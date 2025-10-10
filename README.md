@@ -2,7 +2,6 @@
 
 🚀 **API REST pour piloter Borgmatic depuis Node-RED** avec support complet de Nextcloud AIO.
 
-[![Build](https://github.com/quentinreytinas/borgmatic-api-nextcloud-aio/actions/workflows/build.yml/badge.svg)](https://github.com/quentinreytinas/borgmatic-api-nextcloud-aio/actions)
 
 ## 🎯 Fonctionnalités
 
