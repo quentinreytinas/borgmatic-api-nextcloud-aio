@@ -6,6 +6,7 @@ on:
     paths:
       - 'Dockerfile'
       - 'borgmatic_api.py'
+      - 'borgmatic_api_app/**'
       - 'entrypoint.sh'
       - '.github/workflows/build.yml'
   schedule:

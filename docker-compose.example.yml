@@ -235,26 +235,11 @@ services:
       - cache:/root/.cache/borg
       - ssh:/root/.ssh
       
-      # ========================================================================
-      # ⚠️ SOCKET DOCKER - CHOISIR UNE OPTION
-      # ========================================================================
-      
-      # OPTION A (RECOMMANDÉ): Avec Docker Socket Proxy
-      # Commenter ou supprimer la ligne ci-dessous et utiliser DOCKER_HOST ci-dessus
-      
-      # OPTION B (DEV UNIQUEMENT): Accès direct au socket
-      # ⚠️ DANGER: Donne un accès complet au daemon Docker
-      # Décommenter la ligne suivante UNIQUEMENT pour développement
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    
-    # ==========================================================================
-    # LABELS & HEALTHCHECK
-    # ==========================================================================
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.stop-signal=SIGTERM"
       - "com.centurylinklabs.watchtower.stop-timeout=300s"
-    
+
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"]
       interval: 30s
@@ -262,9 +247,18 @@ services:
       retries: 3
       start_period: 10s
 
-# ==============================================================================
-# VOLUMES
-# ==============================================================================
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    networks:
+      - nodered_borgmatic_nextcloud
+    environment:
+      CONTAINERS: 1
+      INFO: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
 volumes:
   # Volumes Nextcloud AIO (externes, créés par AIO)
   nextcloud_aio_mastercontainer:

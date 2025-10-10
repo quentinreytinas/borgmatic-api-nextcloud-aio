@@ -1,0 +1,46 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'borgmatic_api.py'
+      - 'borgmatic_api_app/**'
+      - 'tests/**'
+      - 'requirements-dev.txt'
+      - '.github/workflows/tests.yml'
+  pull_request:
+    paths:
+      - '**.py'
+      - 'requirements-dev.txt'
+      - '.github/workflows/tests.yml'
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Check formatting with black
+        run: black --check .
+
+      - name: Run tests
+        env:
+          API_TOKEN: test-write
+          API_READ_TOKEN: test-read
+          APP_FROM_HEADER: NodeRED-Internal
+        run: pytest
