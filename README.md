@@ -116,6 +116,15 @@ openssl rand -hex 32
 L'API refuse si borg_passphrase == ssh_passphrase (sécurité renforcée).
 Rate limiting
 
+
+📝 Licence
+MIT License - voir LICENSE
+🙏 Remerciements
+
+Borgmatic - Outil de backup Borg
+Nextcloud AIO - Nextcloud All-in-One
+Flask - Framework web Python
+
 /create-backup : 5 requêtes / 60s
 /repositories/{label}/check : 10 requêtes / 60s
 /emergency/* : 2 requêtes / 600s
