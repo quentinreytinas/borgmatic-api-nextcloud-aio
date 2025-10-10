@@ -31,19 +31,19 @@ git clone https://github.com/quentinreytinas/borgmatic-api-nextcloud-aio.git
 cd borgmatic-api-nextcloud-aio
 ```
 
-# Copier et adapter la config
+### Copier et adapter la config
 ```bash
 cp docker-compose.example.yml docker-compose.yml
 ```
 
-# Générer un token fort
+### Générer un token fort
 ```bash
 openssl rand -hex 32
 ```
 
-# Éditer docker-compose.yml et remplacer:
-# - API_TOKEN=CHANGEME_... par votre token
-# - Les chemins volumes à votre configuration
+### Éditer docker-compose.yml et remplacer:
+### - API_TOKEN=CHANGEME_... par votre token
+### - Les chemins volumes à votre configuration
 ```bash
 nano docker-compose.yml
 ```
@@ -72,9 +72,12 @@ bashcurl -X POST http://borgmatic-api:5000/create-backup \
     "progress": true
   }'
 ```
-```json
+
 Réponse :
-json{
+json
+```json
+
+{
   "ok": true,
   "job_id": "create:1234567890",
   "pid": 42,
