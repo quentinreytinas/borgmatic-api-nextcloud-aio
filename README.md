@@ -48,11 +48,11 @@ openssl rand -hex 32
 nano docker-compose.yml
 ```
 
-# Lancer
+### Lancer
 ```bash
 docker compose up -d
 ```
-# Vérifier
+### Vérifier
 ```bash
 curl -H "Authorization: Bearer VOTRE_TOKEN" \
      -H "X-From-NodeRed: NodeRED-Internal" \
@@ -60,6 +60,7 @@ curl -H "Authorization: Bearer VOTRE_TOKEN" \
 ```
 
 Exemple : Créer un backup
+
 ```bash
 bashcurl -X POST http://borgmatic-api:5000/create-backup \
   -H "Authorization: Bearer VOTRE_TOKEN" \
@@ -85,7 +86,7 @@ json
 }
 ```
 
-# Suivi temps réel (SSE)
+### Suivi temps réel (SSE)
 
 ```javascript
 // Node-RED ou JavaScript
@@ -100,19 +101,19 @@ evtSource.addEventListener('stderr', (e) => {
 });
 ```
 
-# 🔐 Sécurité
+### 🔐 Sécurité
 Authentification
 Deux mécanismes obligatoires :
 
 Header custom : X-From-NodeRed: VotreValeur
 Bearer token : Authorization: Bearer VOTRE_TOKEN
 
-# Générer un token fort
+### Générer un token fort
 ```bash
 openssl rand -hex 32
 ```
 
-# Secrets distincts
+### Secrets distincts
 L'API refuse si borg_passphrase == ssh_passphrase (sécurité renforcée).
 Rate limiting
 
