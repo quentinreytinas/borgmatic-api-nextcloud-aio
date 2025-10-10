@@ -323,7 +323,7 @@ def events_stream():
                                     yield f"event: {it['kind']}\ndata: {json.dumps(it, ensure_ascii=False)}\n\n"
                 now = time.time()
                 if now - last_beat >= APP_SSE_HEARTBEAT_SEC:
-                    yield f"event: heartbeat\ndata: {json.dumps({'t': now}, ensure_ascii=False)}\n\n"
+                    yield f"event: heartbeat\ndata: {json.dumps({'t': now})}\n\n"
                     last_beat = now
                 if had_item:
                     last_any = now
