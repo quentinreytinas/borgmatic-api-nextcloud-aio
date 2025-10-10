@@ -1,27 +1,155 @@
-# docker-compose.example.yml
-# TEMPLATE PUBLIC - Copier vers docker-compose.yml et adapter
+# ==============================================================================
+# Docker Compose - Borgmatic API with Docker Socket Proxy (Secured)
+# ==============================================================================
+# Ce fichier montre les deux configurations possibles :
+# 1. Avec Docker Socket Proxy (RECOMMANDÉ pour production)
+# 2. Sans Docker Socket Proxy (accès direct au socket - développement uniquement)
+#
+# Usage:
+#   cp docker-compose.example.yml docker-compose.yml
+#   cp .env.example .env
+#   # Éditer .env avec vos valeurs
+#   docker-compose up -d
+# ==============================================================================
 
+# ==============================================================================
+# RÉSEAUX
+# ==============================================================================
 networks:
+  # Réseau externe partagé avec Node-RED et Nextcloud AIO
   nodered_borgmatic_nextcloud:
     external: true
+  
+  # Réseau interne pour le Socket Proxy (pas d'accès Internet)
+  # ⚠️ Décommenter si vous utilisez le Socket Proxy
+  socket-proxy:
+    driver: bridge
+    internal: true
 
+# ==============================================================================
+# SERVICES
+# ==============================================================================
 services:
+  # ============================================================================
+  # DOCKER SOCKET PROXY - Couche de sécurité (RECOMMANDÉ)
+  # ============================================================================
+  # ⚠️ Décommenter toute cette section pour activer le Socket Proxy
+  
+  # docker-socket-proxy:
+  #   image: tecnativa/docker-socket-proxy:latest
+  #   container_name: docker-socket-proxy
+  #   hostname: docker-socket-proxy
+  #   restart: unless-stopped
+  #   
+  #   networks:
+  #     - socket-proxy
+  #   
+  #   environment:
+  #     # === Permissions Docker API ===
+  #     # Ces permissions définissent ce que l'API peut faire via Docker
+  #     
+  #     # Lecture des conteneurs (docker ps, docker inspect)
+  #     CONTAINERS: 1
+  #     
+  #     # Exécution de commandes dans les conteneurs (docker exec)
+  #     # ⚠️ Nécessaire pour les backups AIO mais représente un risque
+  #     # La whitelist exec dans borgmatic_api.py limite ce risque
+  #     EXEC: 1
+  #     
+  #     # Lecture des volumes (docker volume ls)
+  #     VOLUMES: 1
+  #     
+  #     # === TOUT LE RESTE EST BLOQUÉ ===
+  #     
+  #     # Opérations d'écriture dangereuses
+  #     POST: 0           # Bloquer création de ressources
+  #     DELETE: 0         # Bloquer suppression
+  #     
+  #     # Gestion avancée
+  #     BUILD: 0          # Pas de docker build
+  #     COMMIT: 0         # Pas de docker commit
+  #     CONFIGS: 0        # Pas d'accès aux configs
+  #     DISTRIBUTION: 0   # Pas d'accès à la distribution
+  #     IMAGES: 0         # Pas de gestion d'images
+  #     INFO: 1           # Autoriser docker info (pour healthcheck)
+  #     NETWORKS: 0       # Pas de gestion réseau
+  #     NODES: 0          # Pas d'accès Swarm nodes
+  #     PING: 1           # Autoriser ping (pour healthcheck)
+  #     PLUGINS: 0        # Pas d'accès aux plugins
+  #     SECRETS: 0        # Pas d'accès aux secrets
+  #     SERVICES: 0       # Pas d'accès Swarm services
+  #     SESSION: 0        # Pas de session
+  #     SWARM: 0          # Pas d'accès Swarm
+  #     SYSTEM: 0         # Pas d'accès system
+  #     TASKS: 0          # Pas d'accès aux tasks
+  #     VERSION: 1        # Autoriser version (pour healthcheck)
+  #     
+  #     # Logs pour audit (optionnel)
+  #     LOG_LEVEL: info
+  #   
+  #   volumes:
+  #     # Socket Docker monté en LECTURE SEULE
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #   
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   
+  #   # Désactiver toutes les capabilities non nécessaires
+  #   cap_drop:
+  #     - ALL
+  #   
+  #   # Mode lecture seule du filesystem (sauf /run pour le socket)
+  #   read_only: true
+  #   tmpfs:
+  #     - /run
+  #   
+  #   healthcheck:
+  #     test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:2375/version"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+  #     start_period: 5s
+  #   
+  #   labels:
+  #     - "com.centurylinklabs.watchtower.enable=false"
+
+  # ============================================================================
+  # BORGMATIC API - Application principale
+  # ============================================================================
   borgmatic-api:
     image: ghcr.io/quentinreytinas/borgmatic-api-nextcloud-aio:latest
     container_name: borgmatic-api
     hostname: borgmatic-api
     restart: unless-stopped
     
+    # ⚠️ IMPORTANT: Décommenter cette ligne si vous utilisez le Socket Proxy
+    # depends_on:
+    #   docker-socket-proxy:
+    #     condition: service_healthy
+    
     networks:
-      - nodered_borgmatic_nextcloud
+      - nodered_borgmatic_nextcloud  # Communication avec Node-RED
+      # ⚠️ Décommenter si vous utilisez le Socket Proxy
+      # - socket-proxy                  # Communication avec le proxy
     
     environment:
-      # === SÉCURITÉ: Générer avec: openssl rand -hex 32 ===
-      API_TOKEN: "CHANGEME_GENERATE_STRONG_TOKEN"
-      API_READ_TOKEN: "CHANGEME_GENERATE_STRONG_TOKEN"
-      APP_FROM_HEADER: "NodeRED-Internal"
+      # ========================================================================
+      # SÉCURITÉ - AUTHENTIFICATION (OBLIGATOIRE)
+      # ========================================================================
+      # Token d'écriture pour opérations sensibles (backup, restore, etc.)
+      # Générer avec: openssl rand -base64 32
+      API_TOKEN: "${BORG_API_TOKEN:?ERREUR: BORG_API_TOKEN requis dans .env}"
       
-      # === Flask/Gunicorn ===
+      # Token de lecture pour opérations read-only (status, info, logs)
+      # Si non défini, utilise BORG_API_TOKEN
+      API_READ_TOKEN: "${BORG_API_READ_TOKEN:?ERREUR: BORG_API_READ_TOKEN requis dans .env}"
+      
+      # Header personnalisé pour identification du client (Node-RED)
+      APP_FROM_HEADER: "${APP_FROM_HEADER:?ERREUR: APP_FROM_HEADER requis dans .env}"
+      
+      # ========================================================================
+      # FLASK / GUNICORN
+      # ========================================================================
       API_BIND: "0.0.0.0"
       API_PORT: "5000"
       API_WORKERS: "2"
@@ -30,52 +158,98 @@ services:
       API_KEEPALIVE: "75"
       API_LOGLEVEL: "info"
       
-      # === Borg/Borgmatic ===
+      # ========================================================================
+      # BORGMATIC / BORG
+      # ========================================================================
       BORGMATIC_CONFIG_DIR: "/etc/borgmatic.d"
       BORG_BASE_DIR: "/var/lib/borg"
       BORG_SSH_DIR: "/root/.ssh"
       
-      # === Nextcloud AIO ===
+      # ========================================================================
+      # NEXTCLOUD AIO INTEGRATION
+      # ========================================================================
       AIO_MASTER: "nextcloud-aio-mastercontainer"
       AIO_DAILY: "/daily-backup.sh"
       AIO_HEALTH: "/healthcheck.sh"
       
-      # === SSE ===
+      # ========================================================================
+      # SERVER-SENT EVENTS (SSE) & WEBHOOKS
+      # ========================================================================
       APP_SSE_HEARTBEAT_SEC: "15"
       APP_SSE_BASE_URL: "http://borgmatic-api:5000"
+      APP_READY_WEBHOOK_URL: "http://nodered:1880/webhooks/borgmatic/ready"
       
-      # === Timezone ===
+      # ========================================================================
+      # DOCKER SOCKET PROXY CONFIGURATION
+      # ========================================================================
+      # ⚠️ CHOIX IMPORTANT:
+      # 
+      # OPTION A (RECOMMANDÉ): Avec Docker Socket Proxy
+      # Décommenter la ligne suivante ET la section docker-socket-proxy ci-dessus
+      # DOCKER_HOST: "tcp://docker-socket-proxy:2375"
+      
+      # OPTION B (DEV UNIQUEMENT): Accès direct au socket
+      # Laisser commenté et utiliser le volume /var/run/docker.sock ci-dessous
+      # DOCKER_HOST: ""
+      
+      # ========================================================================
+      # SYSTÈME
+      # ========================================================================
       TZ: "Europe/Paris"
     
+    # ==========================================================================
+    # DEVICES & CAPABILITIES
+    # ==========================================================================
     devices:
+      # Nécessaire pour borgmatic mount (FUSE)
       - "/dev/fuse:/dev/fuse"
     
     cap_add:
+      # Nécessaire pour borgmatic mount (FUSE)
       - SYS_ADMIN
+    
+    cap_drop:
+      # Retirer toutes les autres capabilities
+      - ALL
     
     security_opt:
       - no-new-privileges:true
     
+    # ==========================================================================
+    # VOLUMES
+    # ==========================================================================
     volumes:
-      # Configs borgmatic (ADAPTER le chemin)
+      # === Configs borgmatic (lecture seule) ===
       - ./configs:/etc/borgmatic.d:ro
       
-      # Volumes Nextcloud AIO (lecture seule)
+      # === Volumes Nextcloud AIO (lecture seule) ===
       - nextcloud_aio_mastercontainer:/nextcloud_aio_volumes/nextcloud_aio_mastercontainer:ro
       - nextcloud_aio_nextcloud:/nextcloud_aio_volumes/nextcloud_aio_nextcloud:ro
-      - nextcloud_aio_nextcloud_data:/nextcloud_aio_volumes/nextcloud_aio_nextcloud_data:ro
+      - nextcloud_aio_nextcloud:/nextcloud_aio_volumes/nextcloud_aio_nextcloud_data:ro
       - nextcloud_aio_database:/nextcloud_aio_volumes/nextcloud_aio_database:ro
       - nextcloud_aio_database_dump:/nextcloud_aio_volumes/nextcloud_aio_database_dump:ro
       - nextcloud_aio_redis:/nextcloud_aio_volumes/nextcloud_aio_redis:ro
       - nextcloud_aio_apache:/nextcloud_aio_volumes/nextcloud_aio_apache:ro
       
-      # Cache & SSH (persistants)
+      # === Cache & SSH (persistants) ===
       - cache:/root/.cache/borg
       - ssh:/root/.ssh
       
-      # Docker socket pour docker exec
+      # ========================================================================
+      # ⚠️ SOCKET DOCKER - CHOISIR UNE OPTION
+      # ========================================================================
+      
+      # OPTION A (RECOMMANDÉ): Avec Docker Socket Proxy
+      # Commenter ou supprimer la ligne ci-dessous et utiliser DOCKER_HOST ci-dessus
+      
+      # OPTION B (DEV UNIQUEMENT): Accès direct au socket
+      # ⚠️ DANGER: Donne un accès complet au daemon Docker
+      # Décommenter la ligne suivante UNIQUEMENT pour développement
       - /var/run/docker.sock:/var/run/docker.sock:ro
     
+    # ==========================================================================
+    # LABELS & HEALTHCHECK
+    # ==========================================================================
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.stop-signal=SIGTERM"
@@ -86,13 +260,18 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
 
+# ==============================================================================
+# VOLUMES
+# ==============================================================================
 volumes:
+  # Volumes Nextcloud AIO (externes, créés par AIO)
   nextcloud_aio_mastercontainer:
     external: true
   nextcloud_aio_nextcloud:
     external: true
-  nextcloud_aio_nextcloud_data:
+  nextcloud_aio_nextcloud:
     external: true
   nextcloud_aio_database:
     external: true
@@ -102,5 +281,52 @@ volumes:
     external: true
   nextcloud_aio_apache:
     external: true
+  
+  # Volumes locaux (gérés par ce compose)
   cache:
+    driver: local
   ssh:
+    driver: local
+
+# ==============================================================================
+# NOTES DE CONFIGURATION
+# ==============================================================================
+# 
+# CONFIGURATION RECOMMANDÉE POUR PRODUCTION:
+# 
+# 1. Activer le Docker Socket Proxy:
+#    - Décommenter toute la section 'docker-socket-proxy'
+#    - Décommenter le réseau 'socket-proxy' dans borgmatic-api.networks
+#    - Décommenter le depends_on dans borgmatic-api
+#    - Décommenter DOCKER_HOST dans borgmatic-api.environment
+#    - Commenter/supprimer le volume /var/run/docker.sock dans borgmatic-api.volumes
+# 
+# 2. Configurer les variables d'environnement:
+#    - Copier .env.example vers .env
+#    - Générer des tokens sécurisés
+#    - Définir APP_FROM_HEADER
+# 
+# 3. Préparer les configs borgmatic:
+#    - Créer le dossier ./configs
+#    - Ajouter vos fichiers .yaml de configuration borgmatic
+# 
+# 4. Vérifier la sécurité:
+#    - Lancer: docker-compose up -d
+#    - Vérifier les logs: docker logs borgmatic-api | grep "Security Configuration"
+#    - Tester: curl http://localhost:5000/security/exec-whitelist
+# 
+# NIVEAUX DE SÉCURITÉ:
+# 
+# Niveau 1 (DEV UNIQUEMENT): Accès direct au socket
+#   Protection: ~40% - Socket en lecture seule uniquement
+#   Risque: docker exec permet toujours beaucoup de choses
+# 
+# Niveau 2 (PRODUCTION): Socket Proxy + Whitelist Exec
+#   Protection: ~85% - Limite drastique des commandes possibles
+#   Risque: Les scripts whitelistés peuvent avoir des vulnérabilités
+# 
+# Niveau 3 (PARANOID): Niveau 2 + AppArmor + Falco + Vault
+#   Protection: ~95% - Défense en profondeur complète
+#   Risque: Minimal, exploitation très difficile
+# 
+# ==============================================================================
