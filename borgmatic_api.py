@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Borgmatic API pour Nextcloud AIO
-================================
+Borgmatic API pour Nextcloud AIO - Compatible Docker Socket Proxy
+=================================================================
 - Pilotable par Node-RED avec authentification bidirectionnelle
 - Liste blanche STRICTE: uniquement commandes `borgmatic` (jamais `borg`)
-- Aucun shell pour `borgmatic` (liste d’args); `docker exec` sans shell
+- Compatible Docker Socket Proxy avec gestion d'erreurs
+- Aucun shell pour `borgmatic` (liste d'args); `docker exec` sans shell
 - SSE & poll avec buffers thread-safe + GC
 """
 
@@ -34,6 +35,31 @@ AIO_DAILY  = os.environ.get("AIO_DAILY",  "/daily-backup.sh")
 AIO_HEALTH = os.environ.get("AIO_HEALTH", "/healthcheck.sh")
 REQUIRED_AIO_ARCHIVE_FORMAT = "{now:%Y%m%d_%H%M%S}-nextcloud-aio"
 
+# Docker Socket Proxy
+DOCKER_HOST = os.environ.get("DOCKER_HOST", "")
+USE_SOCKET_PROXY = DOCKER_HOST.startswith("tcp://")
+
+# Docker Exec Security - Whitelist stricte
+ALLOWED_EXEC_CONTAINERS = {
+    "nextcloud-aio-mastercontainer": {
+        "commands": ["/daily-backup.sh", "/healthcheck.sh"],
+        "no_shell": True,
+        "description": "Nextcloud AIO Master - backup and health scripts only"
+    }
+}
+
+# Commandes shell dangereuses à bloquer systématiquement
+DANGEROUS_COMMANDS = [
+    "bash", "sh", "zsh", "fish", "ash",  # Shells
+    "rm", "rmdir", "dd",                  # Destruction
+    "nc", "netcat", "curl", "wget",       # Exfiltration réseau
+    "chmod", "chown",                     # Modification permissions
+    "useradd", "passwd",                  # Gestion utilisateurs
+    "iptables", "ip",                     # Modification réseau
+    "mount", "umount",                    # Montage filesystem
+    "kill", "killall", "pkill"            # Processus
+]
+
 # Auth
 WRITE_TOKEN = os.environ.get("API_TOKEN", "")
 READ_TOKEN  = os.environ.get("API_READ_TOKEN", WRITE_TOKEN)
@@ -48,7 +74,127 @@ READY_HOOKS: set[str] = set()
 START_TIME  = time.time()
 
 # =============================================================================
-# HELPERS: JSON / AUTH
+# DOCKER SOCKET PROXY - Helpers & Security
+# =============================================================================
+def _check_docker_available() -> tuple[bool, str]:
+    """
+    Vérifie la disponibilité de Docker (CLI ou via Socket Proxy).
+    Retourne (disponible: bool, message: str)
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            version = result.stdout.strip()
+            mode = "Socket Proxy" if USE_SOCKET_PROXY else "Direct Socket"
+            return True, f"Docker {version} ({mode})"
+        return False, f"Docker CLI error: {result.stderr}"
+    except subprocess.TimeoutExpired:
+        return False, "Docker CLI timeout"
+    except FileNotFoundError:
+        return False, "Docker CLI not found"
+    except Exception as e:
+        return False, f"Docker check failed: {str(e)}"
+
+def _validate_docker_exec(container: str, command: List[str]) -> None:
+    """
+    Valide qu'une commande docker exec est autorisée selon la whitelist.
+    Lève PermissionError si la commande n'est pas autorisée.
+    
+    Args:
+        container: Nom du conteneur
+        command: Liste des arguments de la commande (ex: ["/daily-backup.sh"])
+    
+    Raises:
+        PermissionError: Si le conteneur ou la commande n'est pas autorisé
+    """
+    # Vérifier que le conteneur est dans la whitelist
+    if container not in ALLOWED_EXEC_CONTAINERS:
+        raise PermissionError(
+            f"Container '{container}' not in exec whitelist. "
+            f"Allowed: {list(ALLOWED_EXEC_CONTAINERS.keys())}"
+        )
+    
+    config = ALLOWED_EXEC_CONTAINERS[container]
+    cmd_str = " ".join(command)
+    
+    # Bloquer les shells si no_shell est activé
+    if config.get("no_shell", False):
+        for shell in ["bash", "sh", "zsh", "fish", "ash"]:
+            if shell in command:
+                raise PermissionError(
+                    f"Shell access denied for container '{container}'. "
+                    f"Attempted shell: {shell}"
+                )
+    
+    # Bloquer les commandes dangereuses
+    for dangerous in DANGEROUS_COMMANDS:
+        if dangerous in cmd_str.lower():
+            raise PermissionError(
+                f"Dangerous command '{dangerous}' blocked in: {cmd_str}"
+            )
+    
+    # Vérifier que la commande est dans la whitelist
+    allowed_commands = config.get("commands", [])
+    if allowed_commands:
+        command_allowed = False
+        for allowed in allowed_commands:
+            # Vérifier correspondance exacte ou préfixe
+            if cmd_str == allowed or cmd_str.startswith(allowed):
+                command_allowed = True
+                break
+        
+        if not command_allowed:
+            raise PermissionError(
+                f"Command not in whitelist for '{container}'. "
+                f"Attempted: {cmd_str}. "
+                f"Allowed: {allowed_commands}"
+            )
+    
+    # Log de sécurité (pour audit)
+    print(f"[SECURITY] docker exec validated: container={container}, command={cmd_str}")
+
+def _handle_docker_error(operation: str, error: Exception) -> Dict[str, Any]:
+    """
+    Gère les erreurs Docker de manière centralisée.
+    Retourne un dict avec les détails de l'erreur.
+    """
+    error_msg = str(error)
+    
+    # Détection d'erreurs spécifiques au Socket Proxy
+    if "permission denied" in error_msg.lower():
+        return {
+            "error": "docker_permission_denied",
+            "message": f"Docker Socket Proxy denied {operation}",
+            "hint": "Check socket-proxy permissions in docker-compose.yml",
+            "proxy_mode": USE_SOCKET_PROXY
+        }
+    elif "connection refused" in error_msg.lower():
+        return {
+            "error": "docker_connection_refused",
+            "message": "Cannot connect to Docker Socket Proxy",
+            "hint": "Ensure docker-socket-proxy service is running",
+            "proxy_mode": USE_SOCKET_PROXY
+        }
+    elif "no such container" in error_msg.lower():
+        return {
+            "error": "container_not_found",
+            "message": f"Container not found for {operation}",
+            "hint": "Verify container name and ensure it's running"
+        }
+    else:
+        return {
+            "error": "docker_error",
+            "message": f"{operation} failed: {error_msg}",
+            "proxy_mode": USE_SOCKET_PROXY
+        }
+
+# =============================================================================
+# HELPERS: JSON / AUTH / CONFIG RESOLUTION
 # =============================================================================
 def _json_ok(data: Dict[str, Any]):
     data = {"ok": True, **data}
@@ -93,6 +239,23 @@ def _require_auth(read_only=False):
 def _enforce_distinct_pass(borg_pass: Optional[str], ssh_pass: Optional[str]):
     if borg_pass and ssh_pass and borg_pass == ssh_pass:
         raise ValueError("borg_passphrase and ssh_passphrase must be distinct when both are provided")
+
+# --- Résolution unifiée des configs (.yaml/.yml) + garde-fou label ---
+SAFE_LABEL_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
+
+def _resolve_config(label: str) -> Path:
+    """
+    Trouve le fichier de config borgmatic pour `label` dans BORGMATIC_CONFIG_DIR,
+    en testant .yaml puis .yml. Valide le label. Lève FileNotFoundError sinon.
+    """
+    if not SAFE_LABEL_RE.match(label):
+        raise ValueError("Invalid label format")
+    base = Path(BORG_CONFIG_DIR)
+    for ext in ('.yaml', '.yml'):
+        p = base / f"{label}{ext}"
+        if p.exists():
+            return p
+    raise FileNotFoundError(f"Config {label} not found")
 
 # =============================================================================
 # RATE LIMIT (simple)
@@ -170,7 +333,7 @@ ALLOWED_FLAGS = {
 
 def _validate_borgmatic_args(args: List[str]):
     assert args and args[0] == "borgmatic", "bad executable"
-    # Determiner subcommand (après --config si présent)
+    # Déterminer subcommand (après --config si présent)
     if len(args) < 2:
         raise AssertionError("missing subcommand")
     if args[1] in ("--config","-c"):
@@ -201,12 +364,11 @@ def _validate_borgmatic_args(args: List[str]):
 # =============================================================================
 def _run_borgmatic(args: List[str], env: Dict[str,str], job_id: str):
     _validate_borgmatic_args(args)
-
     proc = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=env,
+        env={**os.environ, **env},
         text=True,
         bufsize=1,
         universal_newlines=True
@@ -227,28 +389,39 @@ def _run_borgmatic(args: List[str], env: Dict[str,str], job_id: str):
 # =============================================================================
 @app.route("/")
 def index():
-    return _json_ok({"message": "Borgmatic API is alive", "since": START_TIME, "uptime": time.time() - START_TIME})
+    return _json_ok({
+        "message": "Borgmatic API is alive",
+        "since": START_TIME,
+        "uptime": time.time() - START_TIME,
+        "docker_mode": "Socket Proxy" if USE_SOCKET_PROXY else "Direct Socket",
+        "security": {
+            "exec_whitelist_enabled": True,
+            "allowed_containers": list(ALLOWED_EXEC_CONTAINERS.keys())
+        }
+    })
 
 @app.route("/health")
 def health():
     try:
         _require_auth(read_only=True)
         checks = {"api": "ok", "docker": "unknown", "borgmatic": "unknown", "ssh": "unknown"}
-        # docker (présence CLI)
-        try:
-            p = subprocess.run(["docker","ps","--help"], capture_output=True, text=True, timeout=3)
-            checks["docker"] = "ok" if p.returncode == 0 else "error"
-        except:
-            checks["docker"] = "error"
+        
+        # Docker (via Socket Proxy ou direct)
+        docker_ok, docker_msg = _check_docker_available()
+        checks["docker"] = "ok" if docker_ok else "error"
+        checks["docker_details"] = docker_msg
+        
         # borgmatic
         try:
             p = subprocess.run(["borgmatic","--version"], capture_output=True, text=True, timeout=3)
             checks["borgmatic"] = "ok" if p.returncode == 0 else "error"
         except:
             checks["borgmatic"] = "error"
+        
         # ssh dir
         checks["ssh"] = "ok" if Path(BORG_SSH_DIR).exists() else "error"
-        overall = "healthy" if all(v == "ok" for v in checks.values()) else "degraded"
+        
+        overall = "healthy" if all(v == "ok" for k, v in checks.items() if not k.endswith("_details")) else "degraded"
         return _json_ok({"status": overall, "checks": checks})
     except Exception as e:
         return _json_error(500, "health_check_failed", str(e))
@@ -257,12 +430,15 @@ def health():
 def status():
     try:
         _require_auth(read_only=True)
+        docker_ok, docker_msg = _check_docker_available()
         return _json_ok({
             "sse_base": SSE_BASE_URL or request.host_url.rstrip("/"),
             "configs_dir": BORG_CONFIG_DIR,
             "ssh_dir": BORG_SSH_DIR,
             "jobs_count": len(JOB_BUFFERS),
             "now": time.time(),
+            "docker_mode": "Socket Proxy" if USE_SOCKET_PROXY else "Direct Socket",
+            "docker_status": docker_msg
         })
     except Exception as e:
         return _json_error(401, "unauthorized", str(e))
@@ -292,7 +468,6 @@ def ready_register():
 def ready_trigger():
     try:
         _require_auth(read_only=True)
-        # Démo : on ne POST pas réellement pour rester idempotent côté API
         return _json_ok({"triggered": list(READY_HOOKS)})
     except Exception as e:
         return _json_error(401, "unauthorized", str(e))
@@ -352,43 +527,58 @@ def events_poll(job_id: str):
         return _json_error(401, "unauthorized", str(e))
 
 # =============================================================================
-# 2) DOCKER: CONTAINERS & VOLUMES (via docker CLI sans shell exotique)
+# 2) DOCKER: CONTAINERS & VOLUMES (Compatible Socket Proxy)
 # =============================================================================
 def _docker_ps(all_containers=False) -> List[Dict[str, Any]]:
     try:
         fmt = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}"
         args = ["docker","ps"] + (["-a"] if all_containers else []) + ["--format", fmt]
         p = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        
+        if p.returncode != 0:
+            raise RuntimeError(f"Docker ps failed: {p.stderr}")
+        
         containers = []
         for line in (p.stdout or "").splitlines():
             if not line.strip(): continue
-            cid, name, image, status, state = (line.split("|")+[""]*5)[:5]
-            containers.append({
-                "id": cid, "name": name, "image": image,
-                "status": status, "running": state.lower()=="running"
-            })
+            parts = line.split("|")
+            if len(parts) >= 5:
+                cid, name, image, status, state = parts[:5]
+                containers.append({
+                    "id": cid, "name": name, "image": image,
+                    "status": status, "running": state.lower()=="running"
+                })
         return containers
     except Exception as e:
-        raise RuntimeError(f"Docker ps failed: {e}")
+        error_details = _handle_docker_error("docker ps", e)
+        raise RuntimeError(json.dumps(error_details))
 
 def _docker_volumes(compute_size=False) -> List[Dict[str, Any]]:
     try:
         args = ["docker","volume","ls","--format","{{.Name}}|{{.Mountpoint}}"]
         p = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        
+        if p.returncode != 0:
+            raise RuntimeError(f"Docker volume ls failed: {p.stderr}")
+        
         vols = []
         for line in (p.stdout or "").splitlines():
             if not line.strip(): continue
-            name, mountpoint = (line.split("|")+["",""])[:2]
-            info = {"name": name, "mountpoint": mountpoint}
-            if compute_size and mountpoint:
-                # du -sb mountpoint
-                p2 = subprocess.run(["du","-sb", mountpoint], capture_output=True, text=True)
-                try: info["size_bytes"] = int((p2.stdout or "0").split()[0])
-                except: info["size_bytes"] = None
-            vols.append(info)
+            parts = line.split("|")
+            if len(parts) >= 2:
+                name, mountpoint = parts[:2]
+                info = {"name": name, "mountpoint": mountpoint}
+                if compute_size and mountpoint:
+                    p2 = subprocess.run(["du","-sb", mountpoint], capture_output=True, text=True)
+                    try: 
+                        info["size_bytes"] = int((p2.stdout or "0").split()[0])
+                    except: 
+                        info["size_bytes"] = None
+                vols.append(info)
         return vols
     except Exception as e:
-        raise RuntimeError(f"Docker volume ls failed: {e}")
+        error_details = _handle_docker_error("docker volume ls", e)
+        raise RuntimeError(json.dumps(error_details))
 
 @app.route("/containers")
 def containers_state():
@@ -396,9 +586,20 @@ def containers_state():
         _require_auth(read_only=True)
         scope = request.args.get("scope", "aio")
         all_flag = request.args.get("all", "false").lower() == "true"
-        containers = _docker_ps(all_containers=all_flag)
+        
+        try:
+            containers = _docker_ps(all_containers=all_flag)
+        except RuntimeError as e:
+            # Tenter de parser les détails d'erreur
+            try:
+                error_details = json.loads(str(e))
+                return _json_error(503, **error_details)
+            except:
+                return _json_error(503, "docker_error", str(e))
+        
         if scope == "aio":
             containers = [c for c in containers if c["name"].startswith("nextcloud-aio-")]
+        
         return _json_ok({"containers": containers})
     except Exception as e:
         return _json_error(400, "docker_error", str(e))
@@ -409,21 +610,39 @@ def volumes_status():
         _require_auth(read_only=True)
         scope = request.args.get("scope", "aio")
         compute_size = request.args.get("compute_size", "false").lower() == "true"
-        vols = _docker_volumes(compute_size=compute_size)
+        
+        try:
+            vols = _docker_volumes(compute_size=compute_size)
+        except RuntimeError as e:
+            try:
+                error_details = json.loads(str(e))
+                return _json_error(503, **error_details)
+            except:
+                return _json_error(503, "docker_error", str(e))
+        
         if scope == "aio":
             vols = [v for v in vols if v["name"].startswith("nextcloud_aio_")]
+        
         return _json_ok({"volumes": vols})
     except Exception as e:
         return _json_error(400, "docker_error", str(e))
 
 # =============================================================================
-# 3) NEXTCLOUD AIO (docker exec sans shell)
+# 3) NEXTCLOUD AIO (docker exec sans shell - Compatible Socket Proxy)
 # =============================================================================
 @app.route("/nextcloud/containers/state")
 def aio_containers_state():
     try:
         _require_auth(read_only=True)
-        containers = _docker_ps(all_containers=True)
+        try:
+            containers = _docker_ps(all_containers=True)
+        except RuntimeError as e:
+            try:
+                error_details = json.loads(str(e))
+                return _json_error(503, **error_details)
+            except:
+                return _json_error(503, "docker_error", str(e))
+        
         containers = [c for c in containers if c["name"].startswith("nextcloud-aio-")]
         return _json_ok({"containers": containers})
     except Exception as e:
@@ -433,7 +652,15 @@ def aio_containers_state():
 def aio_running():
     try:
         _require_auth(read_only=True)
-        containers = _docker_ps(all_containers=False)
+        try:
+            containers = _docker_ps(all_containers=False)
+        except RuntimeError as e:
+            try:
+                error_details = json.loads(str(e))
+                return _json_error(503, **error_details)
+            except:
+                return _json_error(503, "docker_error", str(e))
+        
         running = any(c["name"].startswith("nextcloud-aio-") and c["running"] for c in containers)
         return _json_ok({"running": running})
     except Exception as e:
@@ -451,11 +678,23 @@ def aio_official_daily_backup():
             v = body.get(k)
             if v is not None:
                 env_args += ["--env", f"{k}={v}"]
+        
+        # VALIDATION SÉCURITÉ : Vérifier que la commande est autorisée
+        try:
+            _validate_docker_exec(AIO_MASTER, [AIO_DAILY])
+        except PermissionError as pe:
+            return _json_error(403, "exec_forbidden", str(pe))
+        
         args = ["docker","exec"] + env_args + [AIO_MASTER, AIO_DAILY]
-        p = subprocess.run(args, capture_output=True, text=True, timeout=3600)
-        return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
-    except subprocess.TimeoutExpired:
-        return _json_error(408, "timeout", "daily-backup.sh timeout after 1h")
+        
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, timeout=3600)
+            return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
+        except subprocess.TimeoutExpired:
+            return _json_error(408, "timeout", "daily-backup.sh timeout after 1h")
+        except Exception as e:
+            error_details = _handle_docker_error("docker exec daily-backup", e)
+            return _json_error(503, **error_details)
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -464,9 +703,21 @@ def aio_official_daily_backup():
 def aio_check_backup():
     try:
         _require_auth(read_only=False)
+        
+        # VALIDATION SÉCURITÉ
+        try:
+            _validate_docker_exec(AIO_MASTER, [AIO_HEALTH])
+        except PermissionError as pe:
+            return _json_error(403, "exec_forbidden", str(pe))
+        
         args = ["docker","exec", AIO_MASTER, AIO_HEALTH]
-        p = subprocess.run(args, capture_output=True, text=True, timeout=600)
-        return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
+        
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, timeout=600)
+            return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
+        except Exception as e:
+            error_details = _handle_docker_error("docker exec healthcheck", e)
+            return _json_error(503, **error_details)
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -477,9 +728,21 @@ def aio_start_and_update():
         _require_auth(read_only=False)
         body = request.get_json(force=True, silent=True) or {}
         env_args = ["--env", f"AUTOMATIC_UPDATES={body.get('AUTOMATIC_UPDATES','1')}"]
+        
+        # VALIDATION SÉCURITÉ
+        try:
+            _validate_docker_exec(AIO_MASTER, [AIO_DAILY])
+        except PermissionError as pe:
+            return _json_error(403, "exec_forbidden", str(pe))
+        
         args = ["docker","exec"] + env_args + [AIO_MASTER, AIO_DAILY]
-        p = subprocess.run(args, capture_output=True, text=True, timeout=3600)
-        return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
+        
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, timeout=3600)
+            return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
+        except Exception as e:
+            error_details = _handle_docker_error("docker exec start-and-update", e)
+            return _json_error(503, **error_details)
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -521,15 +784,16 @@ def config_get(label: str):
     try:
         _require_auth(read_only=True)
         fmt = request.args.get("format","json")
-        path = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; path = alt if alt.exists() else path
-        if not path.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            path = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         content = path.read_text(encoding="utf-8")
         if fmt == "yaml":
             return (content, 200, {"Content-Type":"text/yaml; charset=utf-8"})
         return _json_ok({"config": yaml.safe_load(content)})
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "read_error", str(e))
 
@@ -541,6 +805,7 @@ def config_validate_all():
         out = []
         for f in files:
             args = ["borgmatic","--config", f, "config", "validate"]
+            _validate_borgmatic_args(["borgmatic","--config", f, "config", "validate"])
             p = subprocess.run(args, capture_output=True, text=True, timeout=60)
             out.append({"file": f, "returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
         return _json_ok({"results": out})
@@ -553,16 +818,18 @@ def config_validate_one(label: str):
         _require_auth(read_only=True)
         body = request.get_json(force=True, silent=True) or {}
         process_timeout = int(body.get("process_timeout", 60))
-        path = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; path = alt if alt.exists() else path
-        if not path.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            path = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         args = ["borgmatic","--config", str(path), "config", "validate"]
+        _validate_borgmatic_args(args)
         p = subprocess.run(args, capture_output=True, text=True, timeout=process_timeout)
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
     except subprocess.TimeoutExpired as te:
         return _json_error(408, "timeout", f"config validate timed out after {te.timeout}s")
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "validate_error", str(e))
 
@@ -570,11 +837,10 @@ def config_validate_one(label: str):
 def config_redacted(label: str):
     try:
         _require_auth(read_only=True)
-        path = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; path = alt if alt.exists() else path
-        if not path.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            path = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         def _rec(o):
             if isinstance(o, dict):
@@ -583,6 +849,8 @@ def config_redacted(label: str):
                 return [_rec(x) for x in o]
             return o
         return _json_ok({"config": _rec(data)})
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "read_error", str(e))
 
@@ -590,13 +858,14 @@ def config_redacted(label: str):
 def config_sources(label: str):
     try:
         _require_auth(read_only=True)
-        path = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; path = alt if alt.exists() else path
-        if not path.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            path = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         return _json_ok({"sources": data.get("sources") or []})
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "read_error", str(e))
 
@@ -604,15 +873,16 @@ def config_sources(label: str):
 def config_check_aio_structure(label: str):
     try:
         _require_auth(read_only=True)
-        path = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; path = alt if alt.exists() else path
-        if not path.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            path = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         fmt = data.get("archive_name_format")
         ok = (fmt == REQUIRED_AIO_ARCHIVE_FORMAT)
         return _json_ok({"archive_name_format": fmt, "required": REQUIRED_AIO_ARCHIVE_FORMAT, "ok": ok})
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "check_error", str(e))
 
@@ -637,13 +907,16 @@ def config_check_aio_structure_all():
 def repo_info(label: str):
     try:
         _require_auth(read_only=True)
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
-        p = subprocess.run(["borgmatic","--config", str(cfg), "info"], capture_output=True, text=True, timeout=90)
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
+        args = ["borgmatic","--config", str(cfg), "info"]
+        _validate_borgmatic_args(args)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=90)
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -651,18 +924,20 @@ def repo_info(label: str):
 def repo_latest_stats(label: str):
     try:
         _require_auth(read_only=True)
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
-        p = subprocess.run(["borgmatic","--config", str(cfg), "info", "--json", "--last", "1"],
-                           capture_output=True, text=True, timeout=90)
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
+        args = ["borgmatic","--config", str(cfg), "info", "--json", "--last", "1"]
+        _validate_borgmatic_args(args)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=90)
         try:
             data = json.loads(p.stdout or "{}")
         except Exception:
             data = {"raw": p.stdout}
         return _json_ok({"returncode": p.returncode, "data": data, "stderr": p.stderr})
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -677,11 +952,10 @@ def repo_check(label: str):
         borg_pass = body.get("borg_passphrase")
         ssh_pass  = body.get("ssh_passphrase")
 
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
 
         env = {}
         if borg_pass: env["BORG_PASSPHRASE"] = borg_pass
@@ -690,6 +964,7 @@ def repo_check(label: str):
 
         args = ["borgmatic","--config", str(cfg), "check","--verbosity", verbosity]
         if repair: args += ["--repair"]
+        _validate_borgmatic_args(args)
 
         job_id = f"check:{label}:{int(time.time())}"
         proc = _run_borgmatic(args, env, job_id)
@@ -698,6 +973,8 @@ def repo_check(label: str):
         sse_url  = f"{sse_base}/events/stream?kinds=stdout,stderr,status&job_id={job_id}"
 
         return _json_ok({"job_id": job_id, "pid": proc.pid, "sse": sse_url})
+    except ValueError as ve:
+        return _json_error(400, "invalid_secrets", str(ve))
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -706,11 +983,10 @@ def repo_archives_list(label: str):
     try:
         _require_auth(read_only=True)
         body = request.get_json(force=True, silent=True) or {}
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         borg_passphrase = body.get("borg_passphrase")
         ssh_passphrase  = body.get("ssh_passphrase")
         _enforce_distinct_pass(borg_passphrase, ssh_passphrase)
@@ -718,8 +994,9 @@ def repo_archives_list(label: str):
         if borg_passphrase: env["BORG_PASSPHRASE"] = borg_passphrase
         if ssh_passphrase:
             env["SSH_ASKPASS"] = "echo"; env["SSH_PASSPHRASE"] = ssh_passphrase
-        p = subprocess.run(["borgmatic","--config", str(cfg), "info", "--json"],
-                           capture_output=True, text=True, env=env, timeout=int(body.get("process_timeout", 60)))
+        args = ["borgmatic","--config", str(cfg), "info", "--json"]
+        _validate_borgmatic_args(args)
+        p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=int(body.get("process_timeout", 60)))
         try:
             data = json.loads(p.stdout or "{}")
         except Exception:
@@ -735,11 +1012,10 @@ def repo_archives_tree(label: str):
     try:
         _require_auth(read_only=True)
         body = request.get_json(force=True, silent=True) or {}
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         archive = body.get("archive","latest")
         borg_passphrase = body.get("borg_passphrase"); ssh_passphrase = body.get("ssh_passphrase")
         _enforce_distinct_pass(borg_passphrase, ssh_passphrase)
@@ -747,8 +1023,9 @@ def repo_archives_tree(label: str):
         if borg_passphrase: env["BORG_PASSPHRASE"] = borg_passphrase
         if ssh_passphrase:
             env["SSH_ASKPASS"] = "echo"; env["SSH_PASSPHRASE"] = ssh_passphrase
-        p = subprocess.run(["borgmatic","--config", str(cfg), "info", "--json", "--archive", str(archive)],
-                           capture_output=True, text=True, env=env, timeout=90)
+        args = ["borgmatic","--config", str(cfg), "info", "--json", "--archive", str(archive)]
+        _validate_borgmatic_args(args)
+        p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=90)
         try:
             data = json.loads(p.stdout or "{}")
         except Exception:
@@ -772,11 +1049,10 @@ def repo_passphrase_change(label: str):
         if not borg_passphrase or not new_borg_passphrase:
             return _json_error(400, "bad_request", "borg_passphrase & new_borg_passphrase required")
         _enforce_distinct_pass(new_borg_passphrase, ssh_passphrase)
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
 
         env = {"BORG_PASSPHRASE": borg_passphrase, "BORG_NEW_PASSPHRASE": new_borg_passphrase}
         if ssh_passphrase:
@@ -812,11 +1088,10 @@ def archive_create():
         if not repository:
             return _json_error(400, "bad_request", "repository required")
 
-        cfg_path = Path(BORG_CONFIG_DIR) / f"{repository}.yaml"
-        if not cfg_path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{repository}.yml"; cfg_path = alt if alt.exists() else cfg_path
-        if not cfg_path.exists():
-            return _json_error(404, "not_found", f"Config {repository} not found")
+        try:
+            cfg_path = _resolve_config(repository)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
 
         env = {}
         if borg_passphrase: env["BORG_PASSPHRASE"] = borg_passphrase
@@ -826,6 +1101,7 @@ def archive_create():
         args = ["borgmatic","--config", str(cfg_path), "create","--verbosity", verbosity]
         if stats:    args += ["--stats"]
         if progress: args += ["--progress"]
+        _validate_borgmatic_args(args)
 
         job_id = f"create:{int(time.time())}"
         proc = _run_borgmatic(args, env, job_id)
@@ -858,11 +1134,10 @@ def archive_create_dry_run():
         if not repository:
             return _json_error(400, "bad_request", "repository required")
 
-        cfg_path = Path(BORG_CONFIG_DIR) / f"{repository}.yaml"
-        if not cfg_path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{repository}.yml"; cfg_path = alt if alt.exists() else cfg_path
-        if not cfg_path.exists():
-            return _json_error(404, "not_found", f"Config {repository} not found")
+        try:
+            cfg_path = _resolve_config(repository)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
 
         env = {}
         if borg_passphrase: env["BORG_PASSPHRASE"] = borg_passphrase
@@ -872,6 +1147,7 @@ def archive_create_dry_run():
         args = ["borgmatic","--config", str(cfg_path), "create","--verbosity", verbosity,"--dry-run"]
         if stats:    args += ["--stats"]
         if progress: args += ["--progress"]
+        _validate_borgmatic_args(args)
 
         p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=timeout_sec)
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
@@ -899,11 +1175,10 @@ def archive_extract():
         if not (repo and archive):
             return _json_error(400, "bad_request", "repository & archive required")
 
-        cfg_path = Path(BORG_CONFIG_DIR) / f"{repo}.yaml"
-        if not cfg_path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{repo}.yml"; cfg_path = alt if alt.exists() else cfg_path
-        if not cfg_path.exists():
-            return _json_error(404, "not_found", f"Config {repo} not found")
+        try:
+            cfg_path = _resolve_config(repo)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
 
         env = {}
         if borg_pass: env["BORG_PASSPHRASE"] = borg_pass
@@ -914,6 +1189,7 @@ def archive_extract():
 
         args = ["borgmatic","--config", str(cfg_path), "extract","--archive", str(archive)]
         for pth in paths: args.append(str(pth))
+        _validate_borgmatic_args(args)
 
         p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=timeout_sec, cwd=str(dest))
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr, "destination": dest})
@@ -938,11 +1214,10 @@ def archive_mount():
         if not (repo and archive and mount_point):
             return _json_error(400, "bad_request", "repository, archive, mount_point required")
 
-        cfg_path = Path(BORG_CONFIG_DIR) / f"{repo}.yaml"
-        if not cfg_path.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{repo}.yml"; cfg_path = alt if alt.exists() else cfg_path
-        if not cfg_path.exists():
-            return _json_error(404, "not_found", f"Config {repo} not found")
+        try:
+            cfg_path = _resolve_config(repo)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
 
         env = {}
         if borg_pass: env["BORG_PASSPHRASE"] = borg_pass
@@ -953,6 +1228,8 @@ def archive_mount():
 
         args = ["borgmatic","--config", str(cfg_path), "mount","--archive", str(archive),"--mount-point", str(mount_point)]
         if body.get("options"): args += ["--options", str(body["options"])]
+        _validate_borgmatic_args(args)
+
         p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=timeout_sec)
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
     except subprocess.TimeoutExpired as te:
@@ -982,6 +1259,8 @@ def archive_umount():
             env["SSH_ASKPASS"] = "echo"; env["SSH_PASSPHRASE"] = ssh_pass
 
         args = ["borgmatic","umount","--mount-point", str(mount_point)]
+        _validate_borgmatic_args(args)
+
         p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=timeout_sec)
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
     except subprocess.TimeoutExpired as te:
@@ -998,12 +1277,13 @@ def archive_umount():
 def lock_quick_check(label: str):
     try:
         _require_auth(read_only=True)
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
-        p = subprocess.run(["borgmatic","--config", str(cfg), "repo-list"], capture_output=True, text=True, timeout=30)
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
+        args = ["borgmatic","--config", str(cfg), "repo-list"]
+        _validate_borgmatic_args(args)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=30)
         out = (p.stdout or "") + "\n" + (p.stderr or "")
         has_lock = ("lock.exclusive" in out.lower()) or ("lock.roster" in out.lower())
         lock_info = {"detection_method": "repo-list"} if has_lock else {}
@@ -1017,7 +1297,9 @@ def locks_status():
         _require_auth(read_only=True)
         results = []
         for pth in Path(BORG_CONFIG_DIR).glob("*.y*ml"):
-            p = subprocess.run(["borgmatic","--config", str(pth), "repo-list"], capture_output=True, text=True, timeout=30)
+            args = ["borgmatic","--config", str(pth), "repo-list"]
+            _validate_borgmatic_args(args)
+            p = subprocess.run(args, capture_output=True, text=True, timeout=30)
             out = (p.stdout or "") + "\n" + (p.stderr or "")
             results.append({"file": pth.name, "locked": ("lock.exclusive" in out.lower())})
         return _json_ok({"results": results})
@@ -1030,7 +1312,9 @@ def locks_active():
         _require_auth(read_only=True)
         active = []
         for pth in Path(BORG_CONFIG_DIR).glob("*.y*ml"):
-            p = subprocess.run(["borgmatic","--config", str(pth), "repo-list"], capture_output=True, text=True, timeout=30)
+            args = ["borgmatic","--config", str(pth), "repo-list"]
+            _validate_borgmatic_args(args)
+            p = subprocess.run(args, capture_output=True, text=True, timeout=30)
             out = (p.stdout or "") + "\n" + (p.stderr or "")
             if "lock.exclusive" in out.lower():
                 active.append(pth.stem)
@@ -1043,12 +1327,13 @@ def locks_active():
 def locks_break(label: str):
     try:
         _require_auth(read_only=False)
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
-        p = subprocess.run(["borgmatic","--config", str(cfg), "break-lock"], capture_output=True, text=True, timeout=60)
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
+        args = ["borgmatic","--config", str(cfg), "break-lock"]
+        _validate_borgmatic_args(args)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=60)
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
@@ -1060,12 +1345,25 @@ def locks_emergency_break_all():
         _require_auth(read_only=False)
         out = []
         for pth in Path(BORG_CONFIG_DIR).glob("*.y*ml"):
-            p = subprocess.run(["borgmatic","--config", str(pth), "break-lock"], capture_output=True, text=True, timeout=60)
+            args = ["borgmatic","--config", str(pth), "break-lock"]
+            _validate_borgmatic_args(args)
+            p = subprocess.run(args, capture_output=True, text=True, timeout=60)
             out.append({"file": pth.name, "rc": p.returncode, "stderr": p.stderr})
-        # Redémarrer Nextcloud AIO (autorisé)
-        restart_args = ["docker","exec","--env","START_CONTAINERS=1", AIO_MASTER, AIO_DAILY]
-        p = subprocess.run(restart_args, capture_output=True, text=True, timeout=600)
-        restart_result = {"rc": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+        
+        # Redémarrer Nextcloud AIO (via docker exec)
+        try:
+            # VALIDATION SÉCURITÉ
+            _validate_docker_exec(AIO_MASTER, [AIO_DAILY])
+            
+            restart_args = ["docker","exec","--env","START_CONTAINERS=1", AIO_MASTER, AIO_DAILY]
+            p = subprocess.run(restart_args, capture_output=True, text=True, timeout=600)
+            restart_result = {"rc": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+        except PermissionError as pe:
+            restart_result = {"error": f"exec_forbidden: {str(pe)}"}
+        except Exception as e:
+            error_details = _handle_docker_error("docker exec restart", e)
+            restart_result = {"error": error_details}
+        
         return _json_ok({"locks_broken": out, "nextcloud_restart": restart_result, "timestamp": time.time()})
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
@@ -1080,17 +1378,30 @@ def emergency_status():
         # process borgmatic ?
         p = subprocess.run(["pgrep","-a","borgmatic"], capture_output=True, text=True)
         active_processes = [line for line in (p.stdout or "").splitlines()]
+        
         # mounts « borg »
         p = subprocess.run(["mount"], capture_output=True, text=True)
         active_mounts = [ln for ln in (p.stdout or "").splitlines() if "borg" in ln.lower()]
-        # containers AIO
-        containers = _docker_ps(all_containers=True)
-        aio = [c for c in containers if c["name"].startswith("nextcloud-aio-")]
-        running_count = sum(1 for c in aio if c["running"])
+        
+        # containers AIO (avec gestion d'erreur Socket Proxy)
+        try:
+            containers = _docker_ps(all_containers=True)
+            aio = [c for c in containers if c["name"].startswith("nextcloud-aio-")]
+            running_count = sum(1 for c in aio if c["running"])
+        except RuntimeError as e:
+            try:
+                error_details = json.loads(str(e))
+                return _json_error(503, **error_details)
+            except:
+                aio = []
+                running_count = 0
+        
         # locks actifs (heuristique)
         locks = []
         for pth in Path(BORG_CONFIG_DIR).glob("*.y*ml"):
-            p = subprocess.run(["borgmatic","--config", str(pth), "repo-list"], capture_output=True, text=True, timeout=10)
+            args = ["borgmatic","--config", str(pth), "repo-list"]
+            _validate_borgmatic_args(args)
+            p = subprocess.run(args, capture_output=True, text=True, timeout=10)
             if "lock.exclusive" in ((p.stdout or "") + (p.stderr or "")).lower():
                 locks.append(pth.stem)
 
@@ -1143,15 +1454,23 @@ def emergency_shutdown():
 
         # 3) Stop containers AIO (sauf master/watchtower/socket-proxy)
         try:
-            names = [c["name"] for c in _docker_ps(all_containers=False) if c["name"].startswith("nextcloud-aio-")]
+            containers = _docker_ps(all_containers=False)
+            names = [c["name"] for c in containers if c["name"].startswith("nextcloud-aio-")]
             to_stop = [n for n in names if not any(x in n for x in ("mastercontainer","watchtower","docker-socket-proxy"))]
             out=""; err=""; rc=0
             for n in to_stop:
-                p = subprocess.run(["docker","stop", n], capture_output=True, text=True, timeout=60)
-                rc = max(rc, p.returncode); out += p.stdout; err += p.stderr
+                try:
+                    p = subprocess.run(["docker","stop", n], capture_output=True, text=True, timeout=60)
+                    rc = max(rc, p.returncode); out += p.stdout; err += p.stderr
+                except Exception as stop_err:
+                    err += f"Failed to stop {n}: {str(stop_err)}\n"
             results["stop_containers"] = {"rc": rc, "stdout": out, "stderr": err}
-        except Exception as e:
-            results["stop_containers"] = {"error": str(e)}
+        except RuntimeError as e:
+            try:
+                error_details = json.loads(str(e))
+                results["stop_containers"] = {"error": error_details}
+            except:
+                results["stop_containers"] = {"error": str(e)}
 
         # 4) Cleanup cache
         cache_dir = Path("/root/.cache/borg")
@@ -1165,6 +1484,15 @@ def emergency_shutdown():
         return _json_ok({"emergency_shutdown": True, "results": results, "timestamp": time.time()})
     except Exception as e:
         return _json_error(500, "emergency_error", str(e))
+
+# --- Alias routes pour compatibilité avec anciennes URLs ---
+@app.route("/emergency-status")
+def emergency_status_alias():
+    return emergency_status()
+
+@app.route("/emergency-shutdown", methods=["POST"])
+def emergency_shutdown_alias():
+    return emergency_shutdown()
 
 # =============================================================================
 # 9) SSH KEYS
@@ -1212,7 +1540,6 @@ def ssh_create(label: str):
         _require_auth(read_only=False)
         body = request.get_json(force=True, silent=True) or {}
         ssh_passphrase = body.get("ssh_passphrase") or ""
-        # Applique la règle "distincte" symboliquement
         _enforce_distinct_pass("dummy", ssh_passphrase)
         prv = Path(BORG_SSH_DIR) / f"id_{label}"
         pub = Path(BORG_SSH_DIR) / f"id_{label}.pub"
@@ -1279,16 +1606,17 @@ def ssh_test(label: str):
         borg_passphrase = body.get("borg_passphrase")
         ssh_passphrase  = body.get("ssh_passphrase")
         _enforce_distinct_pass(borg_passphrase, ssh_passphrase)
-        cfg = Path(BORG_CONFIG_DIR) / f"{label}.yaml"
-        if not cfg.exists():
-            alt = Path(BORG_CONFIG_DIR) / f"{label}.yml"; cfg = alt if alt.exists() else cfg
-        if not cfg.exists():
-            return _json_error(404, "not_found", f"Config {label} not found")
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
         env = {}
         if borg_passphrase: env["BORG_PASSPHRASE"] = borg_passphrase
         if ssh_passphrase:
             env["SSH_ASKPASS"] = "echo"; env["SSH_PASSPHRASE"] = ssh_passphrase
-        p = subprocess.run(["borgmatic","--config", str(cfg), "info"], capture_output=True, text=True, env=env, timeout=30)
+        args = ["borgmatic","--config", str(cfg), "info"]
+        _validate_borgmatic_args(args)
+        p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=30)
         return _json_ok({"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr})
     except ValueError as ve:
         return _json_error(400, "invalid_secrets", str(ve))
@@ -1322,6 +1650,74 @@ def job_get(job_id: str):
         return _json_error(401, "unauthorized", str(e))
 
 # =============================================================================
+# 11) SECURITY - EXEC WHITELIST MANAGEMENT
+# =============================================================================
+@app.route("/security/exec-whitelist")
+def security_exec_whitelist():
+    """Affiche la whitelist actuelle des commandes docker exec autorisées"""
+    try:
+        _require_auth(read_only=True)
+        return _json_ok({
+            "whitelist": ALLOWED_EXEC_CONTAINERS,
+            "dangerous_commands_blocked": DANGEROUS_COMMANDS,
+            "total_containers": len(ALLOWED_EXEC_CONTAINERS)
+        })
+    except Exception as e:
+        return _json_error(401, "unauthorized", str(e))
+
+@app.route("/security/exec-whitelist/validate", methods=["POST"])
+def security_validate_exec():
+    """
+    Teste si une commande docker exec serait autorisée (dry-run).
+    Utile pour tester la whitelist sans exécuter réellement la commande.
+    """
+    try:
+        _require_auth(read_only=True)
+        body = request.get_json(force=True, silent=True) or {}
+        container = body.get("container")
+        command = body.get("command", [])
+        
+        if not container or not command:
+            return _json_error(400, "bad_request", "container and command required")
+        
+        if isinstance(command, str):
+            command = [command]
+        
+        try:
+            _validate_docker_exec(container, command)
+            return _json_ok({
+                "allowed": True,
+                "container": container,
+                "command": command,
+                "message": "Command would be allowed"
+            })
+        except PermissionError as pe:
+            return _json_ok({
+                "allowed": False,
+                "container": container,
+                "command": command,
+                "reason": str(pe)
+            })
+    except Exception as e:
+        return _json_error(400, "validation_error", str(e))
+
+@app.route("/security/audit-log")
+def security_audit_log():
+    """
+    Retourne les dernières commandes docker exec validées (pour audit).
+    Note: Implémentation basique - en production, utiliser un vrai système de logs.
+    """
+    try:
+        _require_auth(read_only=True)
+        # En production, lire depuis un fichier de log ou une DB
+        return _json_ok({
+            "message": "Audit logs available in container stdout",
+            "hint": "docker logs borgmatic-api | grep '[SECURITY]'"
+        })
+    except Exception as e:
+        return _json_error(401, "unauthorized", str(e))
+
+# =============================================================================
 # MAIN
 # =============================================================================
 if __name__ == "__main__":
@@ -1329,6 +1725,26 @@ if __name__ == "__main__":
         print("❌ API_TOKEN manquant"); raise SystemExit(1)
     if not FROM_HEADER:
         print("❌ APP_FROM_HEADER manquant"); raise SystemExit(1)
+    
+    # Vérification Docker au démarrage
+    docker_ok, docker_msg = _check_docker_available()
+    if docker_ok:
+        print(f"✅ {docker_msg}")
+    else:
+        print(f"⚠️  Docker: {docker_msg}")
+        print("   Some endpoints may fail. Check docker-socket-proxy service.")
+    
+    # Afficher la configuration de sécurité
+    print(f"\n🔒 Security Configuration:")
+    print(f"   - Exec whitelist: ENABLED")
+    print(f"   - Allowed containers: {len(ALLOWED_EXEC_CONTAINERS)}")
+    for container, config in ALLOWED_EXEC_CONTAINERS.items():
+        print(f"     • {container}:")
+        print(f"       - Commands: {config.get('commands', ['ANY'])}")
+        print(f"       - No shell: {config.get('no_shell', False)}")
+    print(f"   - Dangerous commands blocked: {len(DANGEROUS_COMMANDS)}")
+    print(f"   - Auth: {'Bidirectional (X-From-NodeRed + Bearer Token)' if FROM_HEADER else 'Token only'}")
+    
     try:
         spec_path = "/app/openapi.yaml"
         if Path(spec_path).exists():
@@ -1336,4 +1752,10 @@ if __name__ == "__main__":
             print(f"✓ OpenAPI loaded: {spec.get('info',{}).get('title','?')} v{spec.get('info',{}).get('version','?')}")
     except Exception as e:
         print(f"⚠ OpenAPI spec issue: {e}")
+    
+    print(f"🚀 Starting Borgmatic API")
+    print(f"   Docker mode: {'Socket Proxy' if USE_SOCKET_PROXY else 'Direct Socket'}")
+    if USE_SOCKET_PROXY:
+        print(f"   Docker host: {DOCKER_HOST}")
+    
     app.run(host="0.0.0.0", port=5000, debug=False)
