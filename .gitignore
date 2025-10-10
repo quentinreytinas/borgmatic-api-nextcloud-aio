@@ -1,0 +1,41 @@
+# Secrets - NE JAMAIS COMMIT
+.env
+.env.*
+secrets/
+*.key
+*.pem
+*.secret
+config.json
+
+# Configuration locale RÉELLE
+docker-compose.yml        # ← Votre config avec vrais tokens
+docker-compose.override.yml
+
+# Borgmatic configs (peuvent contenir secrets)
+borgmatic.d/
+configs/
+*.yaml
+
+# Backups
+backup/
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+logs/
