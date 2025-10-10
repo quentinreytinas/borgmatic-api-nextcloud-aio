@@ -19,6 +19,7 @@
 ### 1. Prérequis
 
 - Docker + Docker Compose
+- Docker Socket Proxy (recommandé) ou accès restreint au socket Docker
 - Borgmatic configuré (`/etc/borgmatic.d/*.yaml`)
 - Nextcloud AIO running
 - Clés SSH pour accès dépôt distant (optionnel)
@@ -40,12 +41,16 @@ cp docker-compose.example.yml docker-compose.yml
 openssl rand -hex 32
 ```
 
+> ℹ️ **Obligatoire** : `API_TOKEN` et `API_READ_TOKEN` doivent être définis (valeurs non vides). L'API refuse de démarrer si l'un des deux est manquant.
+
 ### Éditer docker-compose.yml et remplacer:
 ### - API_TOKEN=CHANGEME_... par votre token
 ### - Les chemins volumes à votre configuration
 ```bash
 nano docker-compose.yml
 ```
+
+> 🛡️ **Conseil sécurité** : utilisez le service `docker-socket-proxy` fourni dans l'exemple et définissez `DOCKER_HOST=tcp://docker-socket-proxy:2375` plutôt que de monter directement `/var/run/docker.sock`.
 
 ### Lancer
 ```bash
@@ -61,7 +66,7 @@ curl -H "Authorization: Bearer VOTRE_TOKEN" \
 Exemple : Créer un backup
 
 ```bash
-bashcurl -X POST http://borgmatic-api:5000/create-backup \
+curl -X POST http://borgmatic-api:5000/create-backup \
   -H "Authorization: Bearer VOTRE_TOKEN" \
   -H "X-From-NodeRed: NodeRED-Internal" \
   -H "Content-Type: application/json" \
@@ -100,6 +105,16 @@ evtSource.addEventListener('stderr', (e) => {
 });
 ```
 
+### 📈 Observabilité
+
+- Endpoint JSON `GET /metrics` (auth lecture) exposant :
+  - `uptime_seconds`
+  - `requests_total`
+  - `responses_ok`
+  - Compteurs d'erreurs (`responses_error_<code>`)
+  - `rate_limit_blocked`
+- Logs de validation Docker (`[SECURITY] docker exec validated ...`) toujours envoyés sur stdout pour audit Watchtower/Stackdriver.
+
 ### 🔐 Sécurité
 Authentification
 Deux mécanismes obligatoires :
@@ -128,3 +143,18 @@ Flask - Framework web Python
 /create-backup : 5 requêtes / 60s
 /repositories/{label}/check : 10 requêtes / 60s
 /emergency/* : 2 requêtes / 600s
+
+## 🧪 Développement
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+
+# Formatage & lint
+black --check .
+ruff check .
+
+# Tests unitaires
+pytest
+```

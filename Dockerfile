@@ -24,6 +24,7 @@ RUN pip3 install --no-cache-dir \
 # Copier l'application
 WORKDIR /app
 COPY borgmatic_api.py /app/
+COPY borgmatic_api_app /app/borgmatic_api_app
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

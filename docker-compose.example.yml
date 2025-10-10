@@ -20,6 +20,7 @@ services:
       API_TOKEN: "CHANGEME_GENERATE_STRONG_TOKEN"
       API_READ_TOKEN: "CHANGEME_GENERATE_STRONG_TOKEN"
       APP_FROM_HEADER: "NodeRED-Internal"
+      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       
       # === Flask/Gunicorn ===
       API_BIND: "0.0.0.0"
@@ -73,19 +74,28 @@ services:
       - cache:/root/.cache/borg
       - ssh:/root/.ssh
       
-      # Docker socket pour docker exec
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.stop-signal=SIGTERM"
       - "com.centurylinklabs.watchtower.stop-timeout=300s"
-    
+
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    restart: unless-stopped
+    networks:
+      - nodered_borgmatic_nextcloud
+    environment:
+      CONTAINERS: 1
+      INFO: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
   nextcloud_aio_mastercontainer:
