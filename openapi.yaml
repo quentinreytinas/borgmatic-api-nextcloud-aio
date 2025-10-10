@@ -1,0 +1,898 @@
+openapi: 3.0.3
+info:
+  title: Borgmatic API for Nextcloud AIO
+  version: "1.0.0"
+  description: |
+    API REST pilotable par Node-RED pour orchestrer Borgmatic autour de Nextcloud AIO.
+    - Auth bidirectionnelle via en-tête `X-From-NodeRed` et Bearer token.
+    - **Read endpoints** acceptent Bearer READ_TOKEN (ou `X-Progress-Token` == READ_TOKEN).
+    - **Write endpoints** exigent Bearer WRITE_TOKEN.
+    - Liste blanche stricte des sous-commandes borgmatic.
+servers:
+  - url: http://localhost:5000
+    description: Local
+  - url: http://borgmatic:5000
+    description: Réseau docker
+
+tags:
+  - name: System
+  - name: Nextcloud AIO
+  - name: Config
+  - name: Repositories
+  - name: Archives
+  - name: Locks
+  - name: Emergency
+  - name: SSH Keys
+  - name: Network
+  - name: Jobs
+
+paths:
+  /:
+    get:
+      tags: [System]
+      summary: Ping / uptime
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /health:
+    get:
+      tags: [System]
+      summary: Health checks (docker, borgmatic, ssh dir)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '500': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /status:
+    get:
+      tags: [System]
+      summary: Status API / buffers / dirs
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ready:
+    get:
+      tags: [System]
+      summary: Indique si l’API est prête et renvoie l’intervalle SSE
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ready/webhook/register:
+    post:
+      tags: [System]
+      summary: Enregistrer un webhook "ready"
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string, format: uri }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /ready/webhook/trigger:
+    post:
+      tags: [System]
+      summary: Déclenchement (no-op côté API pour idempotence)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /events/stream:
+    get:
+      tags: [System]
+      summary: Flux SSE des logs d’un job
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - in: query
+          name: kinds
+          schema: { type: string, default: stdout,stderr,status }
+        - in: query
+          name: job_id
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: event-stream
+          content:
+            text/event-stream: { schema: { type: string } }
+
+  /events/poll/{job_id}:
+    get:
+      tags: [System]
+      summary: Polling des logs d’un job (alternative SSE)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: cursor
+          schema: { type: integer, default: 0 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /containers:
+    get:
+      tags: [System]
+      summary: État des conteneurs Docker
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - in: query
+          name: scope
+          schema: { type: string, enum: [aio, all], default: aio }
+        - in: query
+          name: all
+          schema: { type: boolean, default: false }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /volumes/status:
+    get:
+      tags: [System]
+      summary: État des volumes Docker (option taille)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - in: query
+          name: scope
+          schema: { type: string, enum: [aio, all], default: aio }
+        - in: query
+          name: compute_size
+          schema: { type: boolean, default: false }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /nextcloud/containers/state:
+    get:
+      tags: [Nextcloud AIO]
+      summary: État des conteneurs Nextcloud AIO (tous)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /nextcloud/running:
+    get:
+      tags: [Nextcloud AIO]
+      summary: Nextcloud AIO en cours d’exécution ?
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /nextcloud/official-daily-backup:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Exécuter le script officiel daily-backup.sh (docker exec)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                STOP_CONTAINERS: { type: string }
+                START_CONTAINERS: { type: string }
+                BACKUP_RESTORE_PASSWORD: { type: string }
+                AUTOMATIC_UPDATES: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /nextcloud/check-backup:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Exécuter le healthcheck.sh (docker exec)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /nextcloud/start-and-update:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Lancer et mettre à jour via daily-backup.sh avec AUTOMATIC_UPDATES
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                AUTOMATIC_UPDATES: { type: string, default: "1" }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /nextcloud/serverinfo:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Proxy vers l’API Nextcloud Serverinfo (Basic Auth)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user, app_password]
+              properties:
+                user: { type: string }
+                app_password: { type: string }
+                base_url: { type: string, default: "http://nextcloud-aio-apache:11000" }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /configs:
+    get:
+      tags: [Config]
+      summary: Lister les fichiers de configuration borgmatic (.yaml/.yml)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /configs/{label}:
+    get:
+      tags: [Config]
+      summary: Récupérer une config par label (json ou yaml)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+        - in: query
+          name: format
+          schema: { type: string, enum: [json, yaml], default: json }
+      responses:
+        '200':
+          description: Config
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/OkEnvelope' } }
+            text/yaml: { schema: { type: string } }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /config/validate-all:
+    get:
+      tags: [Config]
+      summary: Valider toutes les configs via borgmatic config validate
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /config/validate/{label}:
+    post:
+      tags: [Config]
+      summary: Valider une config spécifique
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                process_timeout: { type: integer, default: 60 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /config/{label}/redacted:
+    get:
+      tags: [Config]
+      summary: Config masquée (secret fields → ***)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /configs/{label}/sources:
+    get:
+      tags: [Config]
+      summary: Sources déclarées dans la config
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /config/aio-structure/{label}:
+    get:
+      tags: [Config]
+      summary: Vérifier archive_name_format vs format AIO requis
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /config/aio-structure-all:
+    get:
+      tags: [Config]
+      summary: Vérifier archive_name_format pour toutes les configs
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /repositories/{label}/info:
+    get:
+      tags: [Repositories]
+      summary: borgmatic info (stdout/stderr/rc)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /repositories/{label}/latest-stats:
+    get:
+      tags: [Repositories]
+      summary: Dernière archive en JSON (info --json --last 1)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /repositories/{label}/check:
+    post:
+      tags: [Repositories]
+      summary: borgmatic check (async + SSE)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                verbosity: { type: string, default: "1" }
+                repair: { type: boolean, default: false }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /repositories/{label}/archives/list:
+    post:
+      tags: [Repositories]
+      summary: Lister les archives (info --json)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                process_timeout: { type: integer, default: 60 }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /repositories/{label}/archives/tree:
+    post:
+      tags: [Repositories]
+      summary: Détails d’une archive (info --json --archive ...)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                archive: { type: string, default: latest }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /repositories/{label}/passphrase/change:
+    post:
+      tags: [Repositories]
+      summary: Changer la passphrase borg (key change-passphrase)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [borg_passphrase, new_borg_passphrase]
+              properties:
+                borg_passphrase: { type: string }
+                new_borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /create-backup:
+    post:
+      tags: [Archives]
+      summary: Créer une archive (create) — async + SSE
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repository]
+              properties:
+                repository: { type: string }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+                stats: { type: boolean, default: true }
+                progress: { type: boolean, default: true }
+                verbosity: { type: string, default: "1" }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /create-backup/dry-run:
+    post:
+      tags: [Archives]
+      summary: Dry-run (create --dry-run) — synchrone
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repository]
+              properties:
+                repository: { type: string }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+                stats: { type: boolean, default: false }
+                progress: { type: boolean, default: false }
+                verbosity: { type: string, default: "1" }
+                process_timeout: { type: integer, default: 60 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /archives/extract:
+    post:
+      tags: [Archives]
+      summary: Extraire une archive vers un dossier
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repository, archive]
+              properties:
+                repository: { type: string }
+                archive: { type: string }
+                destination: { type: string, default: /tmp/borg-extract }
+                paths:
+                  type: array
+                  items: { type: string }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+                process_timeout: { type: integer, default: 600 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /archives/mount:
+    post:
+      tags: [Archives]
+      summary: Monter une archive (FUSE)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repository, archive, mount_point]
+              properties:
+                repository: { type: string }
+                archive: { type: string }
+                mount_point: { type: string }
+                options: { type: string }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+                process_timeout: { type: integer, default: 600 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /archives/umount:
+    post:
+      tags: [Archives]
+      summary: Démonter un point de montage borg
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mount_point]
+              properties:
+                mount_point: { type: string }
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+                process_timeout: { type: integer, default: 120 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /borgmatic-locks/quick-check/{label}:
+    get:
+      tags: [Locks]
+      summary: Vérification rapide (repo-list) d’un repository
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /borgmatic-locks/status:
+    get:
+      tags: [Locks]
+      summary: État global des verrous pour toutes les configs
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /borgmatic-locks/active:
+    get:
+      tags: [Locks]
+      summary: Liste des labels ayant un lock.exclusive détecté
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /borgmatic-locks/break/{label}:
+    post:
+      tags: [Locks]
+      summary: Forcer la suppression d’un verrou (break-lock)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /borgmatic-locks/emergency-break-all:
+    post:
+      tags: [Locks]
+      summary: Break-lock sur toutes les configs + restart Nextcloud AIO
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /emergency/status:
+    get:
+      tags: [Emergency]
+      summary: État d’urgence (process borgmatic, mounts, locks, containers)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /emergency/shutdown:
+    post:
+      tags: [Emergency]
+      summary: Arrêt d’urgence (umount, tuer borgmatic, stop containers, purge cache)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  # Aliases pour compat
+  /emergency-status:
+    get:
+      tags: [Emergency]
+      summary: Alias de /emergency/status
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /emergency-shutdown:
+    post:
+      tags: [Emergency]
+      summary: Alias de /emergency/shutdown
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ssh-keys:
+    get:
+      tags: [SSH Keys]
+      summary: Lister les clés publiques disponibles (id_*.pub)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ssh-keys/{label}/status:
+    get:
+      tags: [SSH Keys]
+      summary: Présence des fichiers privé/public pour un label
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ssh-keys/{label}/pub:
+    get:
+      tags: [SSH Keys]
+      summary: Récupérer la clé publique & ligne authorized_keys (option restrict_to_path)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - $ref: '#/components/parameters/Label'
+        - in: query
+          name: restrict_to_path
+          schema: { type: string }
+        - in: query
+          name: comment
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /ssh-keys/{label}:
+    post:
+      tags: [SSH Keys]
+      summary: Créer une paire de clés ed25519 (avec passphrase)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ssh_passphrase: { type: string, default: "" }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '409': { $ref: '#/components/responses/ErrorEnvelope' }
+    delete:
+      tags: [SSH Keys]
+      summary: Supprimer la paire de clés d’un label
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ssh-keys/{label}/replace:
+    post:
+      tags: [SSH Keys]
+      summary: Remplacer / régénérer une paire de clés ed25519
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ssh_passphrase: { type: string, default: "" }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ssh-keys/{label}/renew:
+    post:
+      tags: [SSH Keys]
+      summary: Alias de replace
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /ssh-keys/{label}/test:
+    post:
+      tags: [SSH Keys]
+      summary: Tester la connexion repo via borgmatic info (avec passphrases)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /net/tcp-check:
+    get:
+      tags: [Network]
+      summary: Vérifier qu’un port TCP répond
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - in: query
+          name: host
+          required: true
+          schema: { type: string }
+        - in: query
+          name: port
+          required: true
+          schema: { type: integer }
+        - in: query
+          name: timeout
+          schema: { type: number, default: 3 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /jobs/{job_id}:
+    get:
+      tags: [Jobs]
+      summary: Récupérer l’existence d’un job (pour SSE/poll)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    XFrom:
+      in: header
+      name: X-From-NodeRed
+      required: true
+      schema: { type: string, example: BorgmaticAPI }
+      description: Doit correspondre à APP_FROM_HEADER côté serveur.
+    AuthRead:
+      in: header
+      name: Authorization
+      required: false
+      schema: { type: string, example: "Bearer READ_TOKEN" }
+      description: |
+        Auth de lecture. Alternativement, l’en-tête `X-Progress-Token: READ_TOKEN` est accepté.
+    AuthWrite:
+      in: header
+      name: Authorization
+      required: true
+      schema:
+        type: string
+        example: "Bearer WRITE_TOKEN"
+      description: |
+        Auth d’écriture. Ce paramètre doit contenir un token Bearer valide (WRITE_TOKEN)
+        permettant d’exécuter les opérations d’écriture.
+    Label:
+      in: path
+      name: label
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9._-]+$'
+  responses:
+    OkEnvelope:
+      description: Enveloppe succès
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OkEnvelope'
+    ErrorEnvelope:
+      description: Erreur
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    OkEnvelope:
+      type: object
+      properties:
+        ok: { type: boolean, example: true }
+      additionalProperties: true
+    ErrorEnvelope:
+      type: object
+      required: [ok, error, message]
+      properties:
+        ok: { type: boolean, example: false }
+        error: { type: string }
+        message: { type: string }
+      additionalProperties: true
+
+security:
+  - bearerAuth: []
