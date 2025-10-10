@@ -1,5 +1,5 @@
 # Utilise l'image officielle borgmatic comme base
-FROM borgmatic/borgmatic:latest
+FROM ghcr.io/borgmatic-collective/borgmatic:latest
 
 # Métadonnées
 LABEL org.opencontainers.image.source="https://github.com/quentinreytinas/borgmatic-api-nextcloud-aio"
