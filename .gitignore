@@ -1,11 +1,12 @@
 # Secrets - NE JAMAIS COMMIT
-.env
-.env.*
+#.env
+#.env.*
 secrets/
 *.key
 *.pem
 *.secret
 config.json
+!.env.example
 
 # Configuration locale RÉELLE
 docker-compose.yml        # ← Votre config avec vrais tokens
