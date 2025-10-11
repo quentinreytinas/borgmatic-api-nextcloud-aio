@@ -41,11 +41,7 @@ mkdir -p "$BORGMATIC_CONFIG_DIR" "$BORG_SSH_DIR"
 chmod 700 "$BORG_SSH_DIR"
 
 # Génération du fichier de configuration Gunicorn avec hook when_ready
-python3 - <<'PYEOF'
-from pathlib import Path
-from textwrap import dedent
-
-CONFIG = dedent("""\
+cat >/gunicorn_config.py <<'PYEOF'
 import os
 import json
 import time
@@ -88,9 +84,6 @@ def when_ready(server):
 def on_exit(server):
     """Log a message when the Gunicorn server shuts down."""
     logging.info("Gunicorn shutdown complete")
-""")
-
-Path("/gunicorn_config.py").write_text(CONFIG)
 PYEOF
 
 # Validation du fichier de config généré
