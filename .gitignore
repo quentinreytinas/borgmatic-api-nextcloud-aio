@@ -1,6 +1,6 @@
 # Secrets - NE JAMAIS COMMIT
 #.env
-#.env.*
+.env
 secrets/
 *.key
 *.pem
@@ -16,6 +16,9 @@ docker-compose.override.yml
 borgmatic.d/
 configs/
 *.yaml
+!openapi.yaml
+!configs/local_backup_example.yaml
+!configs/remote_backup_example.yaml
 
 # Backups
 backup/
