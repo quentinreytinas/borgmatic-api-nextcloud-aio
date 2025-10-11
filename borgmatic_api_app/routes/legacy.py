@@ -939,6 +939,8 @@ def repo_check(label: str):
         borg_pass = body.get("borg_passphrase")
         ssh_pass = body.get("ssh_passphrase")
 
+        _enforce_distinct_pass(borg_pass, ssh_pass)
+
         try:
             cfg = _resolve_config(label)
         except FileNotFoundError as e:
@@ -1957,7 +1959,7 @@ def security_audit_log():
         return _json_error(401, "unauthorized", str(e))
 
 
-def register_routes(app, services: Services) -> None:
+def _configure_blueprint(services: Services) -> None:
     global SERVICES, BORG_CONFIG_DIR, BORG_BASE_DIR, BORG_SSH_DIR
     global AIO_MASTER, AIO_DAILY, AIO_HEALTH, USE_SOCKET_PROXY
     global ALLOWED_EXEC_CONTAINERS, DANGEROUS_COMMANDS
@@ -1990,4 +1992,19 @@ def register_routes(app, services: Services) -> None:
     START_TIME = services.start_time
     READY_HOOKS.clear()
 
-    app.register_blueprint(bp)
+
+def create_blueprint(services: Services) -> Blueprint:
+    """Return a configured blueprint instance.
+
+    Using a factory keeps dependency injection explicit while still allowing the
+    legacy module to expose a single blueprint object.
+    """
+
+    _configure_blueprint(services)
+    return bp
+
+
+def register_routes(app, services: Services) -> None:
+    """Backwards compatible wrapper registering the blueprint on ``app``."""
+
+    app.register_blueprint(create_blueprint(services))

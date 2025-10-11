@@ -3,19 +3,38 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Any, Dict, Iterable, List
 
 from .config import ExecWhitelistEntry, Settings
 
 
+def _build_docker_env(settings: Settings) -> Dict[str, str]:
+    """Construct the environment for Docker CLI calls."""
+
+    env = os.environ.copy()
+    if settings.use_socket_proxy and settings.docker_host:
+        env["DOCKER_HOST"] = settings.docker_host
+    return env
+
+
 def check_docker_available(settings: Settings) -> tuple[bool, str]:
+    """Return Docker availability and a diagnostic message.
+
+    The helper honours ``DOCKER_HOST`` when the socket proxy is enabled so the
+    health check behaves exactly like the rest of the application.
+    """
+
+    env = _build_docker_env(settings)
+
     try:
         result = subprocess.run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
             capture_output=True,
             text=True,
             timeout=5,
+            env=env,
         )
         if result.returncode == 0:
             version = result.stdout.strip()
@@ -39,8 +58,9 @@ def validate_docker_exec(
 ) -> None:
     whitelist: Dict[str, ExecWhitelistEntry] = settings.exec_whitelist
     if container not in whitelist:
+        allowed = ", ".join(sorted(whitelist.keys())) or "aucun"
         raise PermissionError(
-            f"Container '{container}' not in exec whitelist. Allowed: {list(whitelist.keys())}"
+            f"Container '{container}' interdit. Autorisés : {allowed}"
         )
 
     config = whitelist[container]
@@ -50,15 +70,16 @@ def validate_docker_exec(
         for shell in ("bash", "sh", "zsh", "fish", "ash"):
             if shell in command:
                 raise PermissionError(
-                    f"Shell access denied for container '{container}'. Attempted shell: {shell}"
+                    f"Shell interdit pour '{container}'. Commande refusée : {shell}"
                 )
 
     lowered = command_str.lower()
-    for dangerous in settings.dangerous_commands:
-        if dangerous in lowered:
-            raise PermissionError(
-                f"Dangerous command '{dangerous}' blocked in: {command_str}"
-            )
+    blocked = [dangerous for dangerous in settings.dangerous_commands if dangerous in lowered]
+    if blocked:
+        forbidden = ", ".join(sorted(set(blocked)))
+        raise PermissionError(
+            f"La commande contient {forbidden}, ce qui est interdit"
+        )
 
     allowed = config.commands
     if allowed:
@@ -66,9 +87,9 @@ def validate_docker_exec(
             command_str == candidate or command_str.startswith(candidate)
             for candidate in allowed
         ):
+            allowed_commands = ", ".join(allowed)
             raise PermissionError(
-                f"Command not in whitelist for '{container}'. Attempted: {command_str}. "
-                f"Allowed: {allowed}"
+                f"Commande '{command_str}' refusée pour '{container}'. Autorisées : {allowed_commands}"
             )
 
     print(
@@ -112,7 +133,13 @@ def docker_ps(settings: Settings, all_containers: bool = False) -> List[Dict[str
     try:
         fmt = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}"
         args = ["docker", "ps"] + (["-a"] if all_containers else []) + ["--format", fmt]
-        process = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        process = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_build_docker_env(settings),
+        )
         if process.returncode != 0:
             raise RuntimeError(f"Docker ps failed: {process.stderr}")
 
@@ -142,7 +169,13 @@ def docker_volumes(
 ) -> List[Dict[str, Any]]:
     try:
         args = ["docker", "volume", "ls", "--format", "{{.Name}}|{{.Mountpoint}}"]
-        process = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        process = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_build_docker_env(settings),
+        )
         if process.returncode != 0:
             raise RuntimeError(f"Docker volume ls failed: {process.stderr}")
 
