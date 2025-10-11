@@ -1,0 +1,103 @@
+networks:
+  nodered_borgmatic_nextcloud:
+    external: true
+
+services:
+  borgmatic-api:
+    image: ghcr.io/quentinreytinas/borgmatic-api-nextcloud-aio:latest
+    container_name: borgmatic-api
+    hostname: borgmatic-api
+    restart: unless-stopped
+    
+    networks:
+      - nodered_borgmatic_nextcloud
+    
+    environment:
+      # === Auth API ===
+      API_TOKEN: "${BORG_API_TOKEN:?set at runtime}"
+      API_READ_TOKEN: "${BORG_API_READ_TOKEN:?set at runtime}"
+      APP_FROM_HEADER: "${APP_FROM_HEADER:?set at runtime}"
+      
+      # === Flask/Gunicorn ===
+      API_BIND: "0.0.0.0"
+      API_PORT: "5000"
+      API_WORKERS: "2"
+      API_THREADS: "4"
+      API_TIMEOUT: "300"
+      API_KEEPALIVE: "75"
+      API_LOGLEVEL: "info"
+      
+      # === Borg/Borgmatic ===
+      BORGMATIC_CONFIG_DIR: "/etc/borgmatic.d"
+      BORG_BASE_DIR: "/var/lib/borg"
+      BORG_SSH_DIR: "/root/.ssh"
+      
+      # === Nextcloud AIO ===
+      AIO_MASTER: "nextcloud-aio-mastercontainer"
+      AIO_DAILY: "/daily-backup.sh"
+      AIO_HEALTH: "/healthcheck.sh"
+      
+      # === SSE / Webhooks ===
+      APP_SSE_HEARTBEAT_SEC: "15"
+      APP_SSE_BASE_URL: "http://borgmatic-api:5000"
+      APP_READY_WEBHOOK_URL: "http://nodered:1880/webhooks/borgmatic/ready"
+      
+      # === Timezone ===
+      TZ: "Europe/Paris"
+    
+    devices:
+      - "/dev/fuse:/dev/fuse"
+    
+    cap_add:
+      - SYS_ADMIN
+    
+    security_opt:
+      - no-new-privileges:true
+    
+    volumes:
+      # === Configs borgmatic (lecture seule) ===
+      - ./configs:/etc/borgmatic.d:ro
+      
+      # === Volumes Nextcloud AIO (lecture seule) ===
+      - nextcloud_aio_mastercontainer:/nextcloud_aio_volumes/nextcloud_aio_mastercontainer:ro
+      - nextcloud_aio_nextcloud:/nextcloud_aio_volumes/nextcloud_aio_nextcloud:ro
+      - /mnt/data/nextcloud:/nextcloud_aio_volumes/nextcloud_aio_nextcloud_data:ro
+      - nextcloud_aio_database:/nextcloud_aio_volumes/nextcloud_aio_database:ro
+      - nextcloud_aio_database_dump:/nextcloud_aio_volumes/nextcloud_aio_database_dump:ro
+      - nextcloud_aio_redis:/nextcloud_aio_volumes/nextcloud_aio_redis:ro
+      - nextcloud_aio_apache:/nextcloud_aio_volumes/nextcloud_aio_apache:ro
+      
+      # === Cache & SSH (persistants) ===
+      - cache:/root/.cache/borg
+      - ssh:/root/.ssh
+      
+      # === Docker socket pour docker exec ===
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.stop-signal=SIGTERM"
+      - "com.centurylinklabs.watchtower.stop-timeout=300s"
+    
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  nextcloud_aio_mastercontainer:
+    external: true
+  nextcloud_aio_nextcloud:
+    external: true
+  nextcloud_aio_database:
+    external: true
+  nextcloud_aio_database_dump:
+    external: true
+  nextcloud_aio_redis:
+    external: true
+  nextcloud_aio_apache:
+    external: true
+  cache:
+  ssh:

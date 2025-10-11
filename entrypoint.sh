@@ -19,29 +19,33 @@ umask 077
 : "${BORG_SSH_DIR:=/root/.ssh}"
 
 # Validation des variables critiques
-[ -z "${API_TOKEN:-}" ]      && err "API_TOKEN is required"
+[ -z "${API_TOKEN:-}" ]       && err "API_TOKEN is required"
 [ -z "${APP_FROM_HEADER:-}" ] && err "APP_FROM_HEADER is required"
-[ -f /app/borgmatic_api.py ] || err "/app/borgmatic_api.py not found"
+[ -f /app/borgmatic_api.py ]  || err "/app/borgmatic_api.py not found"
 
-# Vérification des dépendances (l'image officielle inclut déjà tout ce qu'il faut)
-if ! python3 -c 'import flask, gunicorn, yaml' 2>/dev/null; then
+# Vérification des dépendances
+if ! python3 - <<'PYCHK' 2>/dev/null; then
+import flask, gunicorn, yaml
+PYCHK
+then
   err "Missing Python dependencies. Build image properly!"
 fi
 
-if ! command -v borgmatic >/dev/null 2>&1; then
-  err "borgmatic not found in PATH"
-fi
-
+command -v borgmatic >/dev/null 2>&1 || err "borgmatic not found in PATH"
 if ! command -v docker >/dev/null 2>&1; then
   log "WARNING: docker CLI not found. Some endpoints may fail."
 fi
 
-# Préparation des répertoires de configuration et des clés SSH
+# Préparation des répertoires
 mkdir -p "$BORGMATIC_CONFIG_DIR" "$BORG_SSH_DIR"
 chmod 700 "$BORG_SSH_DIR"
 
-# Génération du fichier de configuration Gunicorn avec hook when_ready
-cat >/gunicorn_config.py <<'PYEOF'
+# Génération du fichier de configuration Gunicorn (docstrings remplacés par commentaires)
+python3 - <<'PYEOF'
+from pathlib import Path
+from textwrap import dedent
+
+CONFIG = dedent("""\
 import os
 import json
 import time
@@ -60,7 +64,7 @@ loglevel     = os.getenv('API_LOGLEVEL')
 forwarded_allow_ips = "*"
 
 def when_ready(server):
-    """Trigger a webhook once the API becomes ready."""
+    # Trigger a webhook once the API becomes ready.
     webhook_url = os.getenv('APP_READY_WEBHOOK_URL', '').strip()
     if not webhook_url:
         return
@@ -82,12 +86,18 @@ def when_ready(server):
         server.log.warning(f"[ready] Webhook failed {webhook_url}: {e}")
 
 def on_exit(server):
-    """Log a message when the Gunicorn server shuts down."""
+    # Log a message when the Gunicorn server shuts down.
     logging.info("Gunicorn shutdown complete")
+""")
+
+Path("/gunicorn_config.py").write_text(CONFIG)
 PYEOF
 
 # Validation du fichier de config généré
-if ! python3 -c 'import gunicorn_config' 2>/dev/null; then
+if ! python3 - <<'PYCHK' 2>/dev/null; then
+import gunicorn_config  # noqa: F401
+PYCHK
+then
   err "Generated gunicorn_config.py is invalid"
 fi
 
