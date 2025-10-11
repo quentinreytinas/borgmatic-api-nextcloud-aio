@@ -23,13 +23,10 @@ umask 077
 [ -z "${APP_FROM_HEADER:-}" ] && err "APP_FROM_HEADER is required"
 [ -f /app/borgmatic_api.py ]  || err "/app/borgmatic_api.py not found"
 
-# Vérification des dépendances
-if ! python3 - <<'PYCHK' 2>/dev/null; then
+# Vérification des dépendances (utilise || err pour éviter le piège du heredoc dans un if)
+python3 - <<'PYCHK' 2>/dev/null || err "Missing Python dependencies. Build image properly!"
 import flask, gunicorn, yaml
 PYCHK
-then
-  err "Missing Python dependencies. Build image properly!"
-fi
 
 command -v borgmatic >/dev/null 2>&1 || err "borgmatic not found in PATH"
 if ! command -v docker >/dev/null 2>&1; then
@@ -40,8 +37,8 @@ fi
 mkdir -p "$BORGMATIC_CONFIG_DIR" "$BORG_SSH_DIR"
 chmod 700 "$BORG_SSH_DIR"
 
-# Génération du fichier de configuration Gunicorn (docstrings remplacés par commentaires)
-python3 - <<'PYEOF'
+# Génération du fichier de configuration Gunicorn (docstrings internes remplacés par commentaires)
+python3 - <<'PYGEN'
 from pathlib import Path
 from textwrap import dedent
 
@@ -91,15 +88,12 @@ def on_exit(server):
 """)
 
 Path("/gunicorn_config.py").write_text(CONFIG)
-PYEOF
+PYGEN
 
-# Validation du fichier de config généré
-if ! python3 - <<'PYCHK' 2>/dev/null; then
-import gunicorn_config  # noqa: F401
+# Validation du fichier de config généré (même astuce: || err)
+python3 - <<'PYCHK' 2>/dev/null || err "Generated gunicorn_config.py is invalid"
+import gunicorn_config  # noqa
 PYCHK
-then
-  err "Generated gunicorn_config.py is invalid"
-fi
 
 # Résumé de la configuration
 log "Configuration:"
