@@ -23,10 +23,12 @@ umask 077
 [ -z "${APP_FROM_HEADER:-}" ] && err "APP_FROM_HEADER is required"
 [ -f /app/borgmatic_api.py ]  || err "/app/borgmatic_api.py not found"
 
-# Vérification des dépendances (utilise || err pour éviter le piège du heredoc dans un if)
-python3 - <<'PYCHK' 2>/dev/null || err "Missing Python dependencies. Build image properly!"
+# Vérification des dépendances
+if ! python3 - 2>/dev/null <<'PYCHK'; then
 import flask, gunicorn, yaml
 PYCHK
+    err "Missing Python dependencies. Build image properly!"
+fi
 
 command -v borgmatic >/dev/null 2>&1 || err "borgmatic not found in PATH"
 if ! command -v docker >/dev/null 2>&1; then
@@ -90,10 +92,12 @@ def on_exit(server):
 Path("/gunicorn_config.py").write_text(CONFIG)
 PYGEN
 
-# Validation du fichier de config généré (même astuce: || err)
-python3 - <<'PYCHK' 2>/dev/null || err "Generated gunicorn_config.py is invalid"
+# Validation du fichier de config généré
+if ! python3 - 2>/dev/null <<'PYCHK'; then
 import gunicorn_config  # noqa
 PYCHK
+    err "Generated gunicorn_config.py is invalid"
+fi
 
 # Résumé de la configuration
 log "Configuration:"
