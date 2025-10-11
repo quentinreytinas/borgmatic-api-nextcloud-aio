@@ -64,7 +64,7 @@ loglevel     = os.getenv('API_LOGLEVEL')
 forwarded_allow_ips = "*"
 
 def when_ready(server):
-    """Déclenche un webhook quand l'API est prête."""
+    """Trigger a webhook once the API becomes ready."""
     webhook_url = os.getenv('APP_READY_WEBHOOK_URL', '').strip()
     if not webhook_url:
         return
@@ -81,12 +81,12 @@ def when_ready(server):
             headers={"Content-Type": "application/json"}
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            server.log.info(f"✅ Ready webhook triggered: {webhook_url} (status: {resp.status})")
+            server.log.info(f"[ready] Webhook triggered: {webhook_url} (status: {resp.status})")
     except Exception as e:
-        server.log.warning(f"⚠️ Ready webhook failed {webhook_url}: {e}")
+        server.log.warning(f"[ready] Webhook failed {webhook_url}: {e}")
 
 def on_exit(server):
-    """Journalise la fermeture du serveur."""
+    """Log a message when the Gunicorn server shuts down."""
     logging.info("Gunicorn shutdown complete")
 """)
 
