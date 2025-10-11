@@ -10,6 +10,15 @@ from typing import Any, Dict, Iterable, List
 from .config import ExecWhitelistEntry, Settings
 
 
+def _build_docker_env(settings: Settings) -> Dict[str, str]:
+    """Construct the environment for Docker CLI calls."""
+
+    env = os.environ.copy()
+    if settings.use_socket_proxy and settings.docker_host:
+        env["DOCKER_HOST"] = settings.docker_host
+    return env
+
+
 def check_docker_available(settings: Settings) -> tuple[bool, str]:
     """Return Docker availability and a diagnostic message.
 
@@ -17,9 +26,7 @@ def check_docker_available(settings: Settings) -> tuple[bool, str]:
     health check behaves exactly like the rest of the application.
     """
 
-    env = os.environ.copy()
-    if settings.use_socket_proxy and settings.docker_host:
-        env["DOCKER_HOST"] = settings.docker_host
+    env = _build_docker_env(settings)
 
     try:
         result = subprocess.run(
@@ -126,7 +133,13 @@ def docker_ps(settings: Settings, all_containers: bool = False) -> List[Dict[str
     try:
         fmt = "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}"
         args = ["docker", "ps"] + (["-a"] if all_containers else []) + ["--format", fmt]
-        process = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        process = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_build_docker_env(settings),
+        )
         if process.returncode != 0:
             raise RuntimeError(f"Docker ps failed: {process.stderr}")
 
@@ -156,7 +169,13 @@ def docker_volumes(
 ) -> List[Dict[str, Any]]:
     try:
         args = ["docker", "volume", "ls", "--format", "{{.Name}}|{{.Mountpoint}}"]
-        process = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        process = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_build_docker_env(settings),
+        )
         if process.returncode != 0:
             raise RuntimeError(f"Docker volume ls failed: {process.stderr}")
 

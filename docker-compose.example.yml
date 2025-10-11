@@ -33,85 +33,34 @@ services:
   # ============================================================================
   # DOCKER SOCKET PROXY - Couche de sécurité (RECOMMANDÉ)
   # ============================================================================
-  # ⚠️ Décommenter toute cette section pour activer le Socket Proxy
-  
-  # docker-socket-proxy:
-  #   image: tecnativa/docker-socket-proxy:latest
-  #   container_name: docker-socket-proxy
-  #   hostname: docker-socket-proxy
-  #   restart: unless-stopped
-  #   
-  #   networks:
-  #     - socket-proxy
-  #   
-  #   environment:
-  #     # === Permissions Docker API ===
-  #     # Ces permissions définissent ce que l'API peut faire via Docker
-  #     
-  #     # Lecture des conteneurs (docker ps, docker inspect)
-  #     CONTAINERS: 1
-  #     
-  #     # Exécution de commandes dans les conteneurs (docker exec)
-  #     # ⚠️ Nécessaire pour les backups AIO mais représente un risque
-  #     # La whitelist exec dans borgmatic_api.py limite ce risque
-  #     EXEC: 1
-  #     
-  #     # Lecture des volumes (docker volume ls)
-  #     VOLUMES: 1
-  #     
-  #     # === TOUT LE RESTE EST BLOQUÉ ===
-  #     
-  #     # Opérations d'écriture dangereuses
-  #     POST: 0           # Bloquer création de ressources
-  #     DELETE: 0         # Bloquer suppression
-  #     
-  #     # Gestion avancée
-  #     BUILD: 0          # Pas de docker build
-  #     COMMIT: 0         # Pas de docker commit
-  #     CONFIGS: 0        # Pas d'accès aux configs
-  #     DISTRIBUTION: 0   # Pas d'accès à la distribution
-  #     IMAGES: 0         # Pas de gestion d'images
-  #     INFO: 1           # Autoriser docker info (pour healthcheck)
-  #     NETWORKS: 0       # Pas de gestion réseau
-  #     NODES: 0          # Pas d'accès Swarm nodes
-  #     PING: 1           # Autoriser ping (pour healthcheck)
-  #     PLUGINS: 0        # Pas d'accès aux plugins
-  #     SECRETS: 0        # Pas d'accès aux secrets
-  #     SERVICES: 0       # Pas d'accès Swarm services
-  #     SESSION: 0        # Pas de session
-  #     SWARM: 0          # Pas d'accès Swarm
-  #     SYSTEM: 0         # Pas d'accès system
-  #     TASKS: 0          # Pas d'accès aux tasks
-  #     VERSION: 1        # Autoriser version (pour healthcheck)
-  #     
-  #     # Logs pour audit (optionnel)
-  #     LOG_LEVEL: info
-  #   
-  #   volumes:
-  #     # Socket Docker monté en LECTURE SEULE
-  #     - /var/run/docker.sock:/var/run/docker.sock:ro
-  #   
-  #   security_opt:
-  #     - no-new-privileges:true
-  #   
-  #   # Désactiver toutes les capabilities non nécessaires
-  #   cap_drop:
-  #     - ALL
-  #   
-  #   # Mode lecture seule du filesystem (sauf /run pour le socket)
-  #   read_only: true
-  #   tmpfs:
-  #     - /run
-  #   
-  #   healthcheck:
-  #     test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:2375/version"]
-  #     interval: 30s
-  #     timeout: 5s
-  #     retries: 3
-  #     start_period: 5s
-  #   
-  #   labels:
-  #     - "com.centurylinklabs.watchtower.enable=false"
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-socket-proxy
+    hostname: docker-socket-proxy
+    restart: unless-stopped
+
+    networks:
+      - socket-proxy
+
+    volumes:
+      # Socket Docker monté en LECTURE SEULE
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+    environment:
+      # Permissions minimales pour les besoins de l'API
+      CONTAINERS: 1
+      EXEC: 1
+      VOLUMES: 1
+      INFO: 1
+      VERSION: 1
+
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:2375/version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   # ============================================================================
   # BORGMATIC API - Application principale
@@ -122,15 +71,13 @@ services:
     hostname: borgmatic-api
     restart: unless-stopped
     
-    # ⚠️ IMPORTANT: Décommenter cette ligne si vous utilisez le Socket Proxy
-    # depends_on:
-    #   docker-socket-proxy:
-    #     condition: service_healthy
-    
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy
+
     networks:
       - nodered_borgmatic_nextcloud  # Communication avec Node-RED
-      # ⚠️ Décommenter si vous utilisez le Socket Proxy
-      # - socket-proxy                  # Communication avec le proxy
+      - socket-proxy                  # Communication avec le proxy sécurisé
     
     environment:
       # ========================================================================
@@ -182,15 +129,8 @@ services:
       # ========================================================================
       # DOCKER SOCKET PROXY CONFIGURATION
       # ========================================================================
-      # ⚠️ CHOIX IMPORTANT:
-      # 
-      # OPTION A (RECOMMANDÉ): Avec Docker Socket Proxy
-      # Décommenter la ligne suivante ET la section docker-socket-proxy ci-dessus
-      # DOCKER_HOST: "tcp://docker-socket-proxy:2375"
-      
-      # OPTION B (DEV UNIQUEMENT): Accès direct au socket
-      # Laisser commenté et utiliser le volume /var/run/docker.sock ci-dessous
-      # DOCKER_HOST: ""
+      # Supprimer cette variable si vous utilisez le socket Docker local en développement
+      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
       
       # ========================================================================
       # SYSTÈME
@@ -247,18 +187,6 @@ services:
       retries: 3
       start_period: 10s
 
-  docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:latest
-    container_name: docker-socket-proxy
-    restart: unless-stopped
-    networks:
-      - nodered_borgmatic_nextcloud
-    environment:
-      CONTAINERS: 1
-      INFO: 1
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
 volumes:
   # Volumes Nextcloud AIO (externes, créés par AIO)
   nextcloud_aio_mastercontainer:
@@ -288,12 +216,16 @@ volumes:
 # 
 # CONFIGURATION RECOMMANDÉE POUR PRODUCTION:
 # 
-# 1. Activer le Docker Socket Proxy:
-#    - Décommenter toute la section 'docker-socket-proxy'
-#    - Décommenter le réseau 'socket-proxy' dans borgmatic-api.networks
-#    - Décommenter le depends_on dans borgmatic-api
-#    - Décommenter DOCKER_HOST dans borgmatic-api.environment
-#    - Commenter/supprimer le volume /var/run/docker.sock dans borgmatic-api.volumes
+# 1. Docker Socket Proxy (activé par défaut):
+#    - Laisser le service docker-socket-proxy démarré
+#    - Conserver le réseau 'socket-proxy' dans borgmatic-api.networks
+#    - Garder DOCKER_HOST pointant vers tcp://docker-socket-proxy:2375
+#    - Ne pas monter /var/run/docker.sock dans borgmatic-api (inutile en mode proxy)
+#
+#    Mode développement (socket direct):
+#      * Commenter le service docker-socket-proxy et le réseau socket-proxy
+#      * Supprimer la variable DOCKER_HOST du service borgmatic-api
+#      * (Optionnel) Monter /var/run/docker.sock dans borgmatic-api si nécessaire
 # 
 # 2. Configurer les variables d'environnement:
 #    - Copier .env.example vers .env
