@@ -39,7 +39,7 @@ fi
 mkdir -p "$BORGMATIC_CONFIG_DIR" "$BORG_SSH_DIR"
 chmod 700 "$BORG_SSH_DIR"
 
-# Génération du fichier de configuration Gunicorn (docstrings internes remplacés par commentaires)
+# Génération du fichier de configuration Gunicorn
 python3 - <<'PYGEN'
 from pathlib import Path
 from textwrap import dedent
@@ -94,7 +94,13 @@ PYGEN
 
 # Validation du fichier de config généré
 if ! python3 - 2>/dev/null <<'PYCHK'; then
-import gunicorn_config  # noqa
+import sys
+import py_compile
+try:
+    py_compile.compile('/gunicorn_config.py', doraise=True)
+except py_compile.PyCompileError as e:
+    print(f"Syntax error: {e}", file=sys.stderr)
+    sys.exit(1)
 PYCHK
     err "Generated gunicorn_config.py is invalid"
 fi
