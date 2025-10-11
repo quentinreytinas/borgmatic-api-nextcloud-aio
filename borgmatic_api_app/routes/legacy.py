@@ -939,6 +939,8 @@ def repo_check(label: str):
         borg_pass = body.get("borg_passphrase")
         ssh_pass = body.get("ssh_passphrase")
 
+        _enforce_distinct_pass(borg_pass, ssh_pass)
+
         try:
             cfg = _resolve_config(label)
         except FileNotFoundError as e:
