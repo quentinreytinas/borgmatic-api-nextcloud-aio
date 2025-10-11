@@ -10,7 +10,7 @@ from .config import load_settings
 from .metrics import Metrics
 from .rate_limit import RateLimiter
 from .services import Services
-from .routes import register_routes
+from .routes import create_blueprint
 
 
 def create_app() -> Flask:
@@ -31,5 +31,5 @@ def create_app() -> Flask:
     app.config["JSON_AS_ASCII"] = False
     app.config["SERVICES"] = services
 
-    register_routes(app, services)
+    app.register_blueprint(create_blueprint(services))
     return app

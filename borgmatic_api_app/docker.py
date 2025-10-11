@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import Any, Dict, Iterable, List
 
@@ -10,12 +11,23 @@ from .config import ExecWhitelistEntry, Settings
 
 
 def check_docker_available(settings: Settings) -> tuple[bool, str]:
+    """Return Docker availability and a diagnostic message.
+
+    The helper honours ``DOCKER_HOST`` when the socket proxy is enabled so the
+    health check behaves exactly like the rest of the application.
+    """
+
+    env = os.environ.copy()
+    if settings.use_socket_proxy and settings.docker_host:
+        env["DOCKER_HOST"] = settings.docker_host
+
     try:
         result = subprocess.run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
             capture_output=True,
             text=True,
             timeout=5,
+            env=env,
         )
         if result.returncode == 0:
             version = result.stdout.strip()
@@ -39,8 +51,9 @@ def validate_docker_exec(
 ) -> None:
     whitelist: Dict[str, ExecWhitelistEntry] = settings.exec_whitelist
     if container not in whitelist:
+        allowed = ", ".join(sorted(whitelist.keys())) or "aucun"
         raise PermissionError(
-            f"Container '{container}' not in exec whitelist. Allowed: {list(whitelist.keys())}"
+            f"Container '{container}' interdit. Autorisés : {allowed}"
         )
 
     config = whitelist[container]
@@ -50,15 +63,16 @@ def validate_docker_exec(
         for shell in ("bash", "sh", "zsh", "fish", "ash"):
             if shell in command:
                 raise PermissionError(
-                    f"Shell access denied for container '{container}'. Attempted shell: {shell}"
+                    f"Shell interdit pour '{container}'. Commande refusée : {shell}"
                 )
 
     lowered = command_str.lower()
-    for dangerous in settings.dangerous_commands:
-        if dangerous in lowered:
-            raise PermissionError(
-                f"Dangerous command '{dangerous}' blocked in: {command_str}"
-            )
+    blocked = [dangerous for dangerous in settings.dangerous_commands if dangerous in lowered]
+    if blocked:
+        forbidden = ", ".join(sorted(set(blocked)))
+        raise PermissionError(
+            f"La commande contient {forbidden}, ce qui est interdit"
+        )
 
     allowed = config.commands
     if allowed:
@@ -66,9 +80,9 @@ def validate_docker_exec(
             command_str == candidate or command_str.startswith(candidate)
             for candidate in allowed
         ):
+            allowed_commands = ", ".join(allowed)
             raise PermissionError(
-                f"Command not in whitelist for '{container}'. Attempted: {command_str}. "
-                f"Allowed: {allowed}"
+                f"Commande '{command_str}' refusée pour '{container}'. Autorisées : {allowed_commands}"
             )
 
     print(
