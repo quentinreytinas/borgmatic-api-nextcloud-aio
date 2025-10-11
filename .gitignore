@@ -7,7 +7,6 @@ secrets/
 *.secret
 config.json
 !.env.example
-
 # Configuration locale RÉELLE
 docker-compose.yml        # ← Votre config avec vrais tokens
 docker-compose.override.yml
