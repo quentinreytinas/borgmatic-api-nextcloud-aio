@@ -6,7 +6,8 @@
 ## 🎯 Fonctionnalités
 
 - ✅ **API REST complète** : Créer, lister, extraire, monter des archives Borg
-- ✅ **Intégration Nextcloud AIO** : Contrôle des scripts officiels (daily-backup.sh, healthcheck.sh)
+- ✅ **Intégration Nextcloud AIO** : Workflow complet (stop, backup, updates, healthcheck)
+- ✅ **Compatibilité backup officiel** : Arrêt automatique de `daily-backup.sh` avant `borgmatic`
 - ✅ **SSE (Server-Sent Events)** : Suivi temps réel des backups
 - ✅ **Authentification bidirectionnelle** : Token + header custom
 - ✅ **Rate limiting** : Protection contre abus
@@ -86,9 +87,72 @@ json
   "ok": true,
   "job_id": "create:1234567890",
   "pid": 42,
-  "sse": "http://borgmatic-api:5000/events/stream?job_id=create:1234567890"
+  "sse": "http://borgmatic-api:5000/events/stream?job_id=create:1234567890",
+  "official_daily_stop": {
+    "returncode": 0,
+    "stdout": "Stopping daily-backup\n",
+    "stderr": ""
+  }
 }
 ```
+
+> ℹ️ Le champ `official_daily_stop` résume l'exécution de `docker exec nextcloud-aio-mastercontainer /daily-backup.sh stop`. Si
+> l'arrêt est ignoré (valeurs par défaut absentes), l'objet contient `{"skipped": true, ...}`.
+
+### Orchestration Nextcloud AIO depuis Node-RED
+
+```mermaid
+flowchart LR
+    NR[Node-RED] -->|HTTP POST| API[Borgmatic API]
+    API -->|docker exec| MC[nextcloud-aio-mastercontainer]
+    MC -->|Scripts officiels| Stack[Containers Nextcloud AIO]
+```
+
+> ℹ️ **Socket proxy** : toutes les commandes `docker exec` émises par l'API
+> honorent la variable d'environnement `DOCKER_HOST`. Définissez-la vers le
+> service `docker-socket-proxy` (ex: `tcp://docker-socket-proxy:2375`) pour que
+> chaque arrêt/démarrage passe par la proxy sécurisée.
+
+**1. Forcer l'arrêt du script officiel**
+
+```bash
+curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/stop \
+  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "X-From-NodeRed: NodeRED-Internal" \
+  -H "Content-Type: application/json" \
+  -d '{"timeout": 45}'
+```
+
+**2. Rejouer le workflow officiel (stop containers → backup → updates → restart)**
+
+```bash
+curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run \
+  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "X-From-NodeRed: NodeRED-Internal" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "with_stop": true,
+        "automatic_updates": true,
+        "daily_backup": true,
+        "check_backup": false,
+        "stop_containers": true,
+        "start_containers": true
+      }'
+```
+
+La réponse contient `result.command`, `result.stdout/stderr`, et l'environnement injecté (`env`) pour audit.
+
+**3. Vérifier la disponibilité réseau des conteneurs**
+
+```bash
+curl -X POST http://borgmatic-api:5000/nextcloud/ports/probe \
+  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "X-From-NodeRed: NodeRED-Internal" \
+  -H "Content-Type: application/json" \
+  -d '{"ports": [80,8443,9000]}'
+```
+
+Les ports indiqués comme `online: true` correspondent aux services accessibles (apache, proxy, collabora, etc.).
 
 ### Suivi temps réel (SSE)
 

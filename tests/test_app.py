@@ -47,3 +47,147 @@ def test_metrics_requires_authentication(app):
     client = app.test_client()
     response = client.get("/metrics")
     assert response.status_code == 401
+
+
+def test_daily_backup_stop_endpoint_executes_docker(monkeypatch, app):
+    client = app.test_client()
+    recorded = {}
+
+    class DummyProcess:
+        returncode = 0
+        stdout = "Stopped"
+        stderr = ""
+
+    def fake_run(args, capture_output, text, timeout, env):
+        recorded["args"] = args
+        recorded["timeout"] = timeout
+        recorded["env"] = env
+        return DummyProcess()
+
+    monkeypatch.setattr("borgmatic_api_app.routes.legacy.subprocess.run", fake_run)
+
+    response = client.post(
+        "/nextcloud/daily-backup/stop",
+        json={"timeout": 42},
+        headers=auth_headers(write=True),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["returncode"] == 0
+    assert recorded["args"][0:2] == ["docker", "exec"]
+    assert recorded["args"][-3:] == [
+        "nextcloud-aio-mastercontainer",
+        "/daily-backup.sh",
+        "stop",
+    ]
+    assert recorded["timeout"] == 42
+
+
+def test_daily_backup_run_translates_booleans(monkeypatch, app):
+    client = app.test_client()
+
+    class DummyProcess:
+        returncode = 0
+        stdout = "OK"
+        stderr = ""
+
+    captured = {}
+
+    def fake_run(args, capture_output, text, timeout, env):
+        captured["args"] = args
+        captured["timeout"] = timeout
+        captured["env"] = env
+        return DummyProcess()
+
+    monkeypatch.setattr("borgmatic_api_app.routes.legacy.subprocess.run", fake_run)
+
+    response = client.post(
+        "/nextcloud/daily-backup/run",
+        json={
+            "daily_backup": False,
+            "automatic_updates": True,
+            "extra_env": {"CUSTOM": "value"},
+        },
+        headers=auth_headers(write=True),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    env_payload = payload["env"]
+    assert env_payload["DAILY_BACKUP"] == "0"
+    assert env_payload["AUTOMATIC_UPDATES"] == "1"
+    assert env_payload["CUSTOM"] == "value"
+
+    args = captured["args"]
+    assert "--env" in args
+    assert any(entry.endswith("DAILY_BACKUP=0") for entry in args)
+    assert any(entry.endswith("AUTOMATIC_UPDATES=1") for entry in args)
+    assert any(entry.endswith("CUSTOM=value") for entry in args)
+    assert captured["timeout"] == 3600
+    assert "DOCKER_HOST" not in captured["env"]
+
+
+def test_daily_backup_uses_socket_proxy_when_configured(monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "test-write")
+    monkeypatch.setenv("API_READ_TOKEN", "test-read")
+    monkeypatch.setenv("APP_FROM_HEADER", "NodeRED-Internal")
+    monkeypatch.setenv("DOCKER_HOST", "tcp://socket-proxy:2375")
+
+    app = create_app()
+    client = app.test_client()
+
+    class DummyProcess:
+        returncode = 0
+        stdout = "OK"
+        stderr = ""
+
+    recorded = {}
+
+    def fake_run(args, capture_output, text, timeout, env):
+        recorded["env"] = env
+        return DummyProcess()
+
+    monkeypatch.setattr("borgmatic_api_app.routes.legacy.subprocess.run", fake_run)
+
+    response = client.post(
+        "/nextcloud/daily-backup/stop",
+        headers=auth_headers(write=True),
+    )
+
+    assert response.status_code == 200
+    assert recorded["env"].get("DOCKER_HOST") == "tcp://socket-proxy:2375"
+
+
+def test_ports_probe_reports_results(monkeypatch, app):
+    client = app.test_client()
+
+    class DummySocket:
+        def close(self):
+            pass
+
+    def fake_create_connection(address, timeout=None):
+        host, port = address
+        if port == 8443:
+            raise ConnectionRefusedError("refused")
+        return DummySocket()
+
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy.socket.create_connection",
+        fake_create_connection,
+    )
+
+    response = client.post(
+        "/nextcloud/ports/probe",
+        json={"ports": [80, 8443]},
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["all_online"] is False
+    online_result = next(r for r in payload["results"] if r["port"] == 80)
+    offline_result = next(r for r in payload["results"] if r["port"] == 8443)
+    assert online_result["online"] is True
+    assert offline_result["online"] is False
+    assert "refused" in offline_result["error"]

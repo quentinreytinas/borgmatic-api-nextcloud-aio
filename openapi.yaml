@@ -186,6 +186,59 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/OkEnvelope' }
 
+  /nextcloud/daily-backup/stop:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Exécuter `/daily-backup.sh stop`
+      description: Permet de libérer le lock officiel avant une sauvegarde personnalisée.
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout: { type: integer, default: 30 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /nextcloud/daily-backup/run:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Orchestrer daily-backup.sh avec des booléens
+      description: >-
+        Mapping direct des variables d’environnement du script officiel pour que Node-RED rejoue
+        le workflow : arrêt des conteneurs, création du backup, redémarrage, mises à jour, etc.
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                daily_backup: { type: boolean, default: true }
+                check_backup: { type: boolean, default: false }
+                stop_containers: { type: boolean, default: true }
+                start_containers: { type: boolean, default: true }
+                automatic_updates: { type: boolean, default: false }
+                lock_file_present: { type: boolean }
+                backup_restore_password: { type: string }
+                extra_env: { type: object, additionalProperties: { type: string } }
+                with_stop: { type: boolean, default: false }
+                stop_timeout: { type: integer, default: 30 }
+                timeout: { type: integer, default: 3600 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
+        '403': { $ref: '#/components/responses/ErrorEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+        '503': { $ref: '#/components/responses/ErrorEnvelope' }
+
   /nextcloud/official-daily-backup:
     post:
       tags: [Nextcloud AIO]
@@ -199,10 +252,17 @@ paths:
             schema:
               type: object
               properties:
+                timeout:
+                  type: integer
+                  default: 3600
                 STOP_CONTAINERS: { type: string }
                 START_CONTAINERS: { type: string }
                 BACKUP_RESTORE_PASSWORD: { type: string }
                 AUTOMATIC_UPDATES: { type: string }
+                extra_env:
+                  type: object
+                  additionalProperties:
+                    type: string
       responses:
         '200': { $ref: '#/components/responses/OkEnvelope' }
         '408': { $ref: '#/components/responses/ErrorEnvelope' }
@@ -214,6 +274,15 @@ paths:
       parameters:
         - $ref: '#/components/parameters/XFrom'
         - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout:
+                  type: integer
+                  default: 600
       responses:
         '200': { $ref: '#/components/responses/OkEnvelope' }
 
@@ -231,8 +300,34 @@ paths:
               type: object
               properties:
                 AUTOMATIC_UPDATES: { type: string, default: "1" }
+                timeout:
+                  type: integer
+                  default: 3600
       responses:
         '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /nextcloud/ports/probe:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Vérifier la disponibilité des ports Nextcloud AIO
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host: { type: string, default: '127.0.0.1' }
+                ports:
+                  type: array
+                  items: { type: integer }
+                  default: [80, 8000, 8080, 8443, 9000, 9876]
+                timeout: { type: number, default: 2 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
 
   /nextcloud/serverinfo:
     post:
@@ -468,6 +563,10 @@ paths:
     post:
       tags: [Archives]
       summary: Créer une archive (create) — async + SSE
+      description: |
+        Avant de lancer `borgmatic create`, l'API exécute `docker exec <master> /daily-backup.sh stop`
+        afin d'interrompre proprement le script officiel Nextcloud AIO. La réponse inclut le
+        résultat de cette commande dans le champ `official_daily_stop`.
       parameters:
         - $ref: '#/components/parameters/XFrom'
         - $ref: '#/components/parameters/AuthWrite'
