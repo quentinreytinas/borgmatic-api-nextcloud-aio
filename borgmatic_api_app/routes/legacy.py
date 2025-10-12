@@ -3,6 +3,7 @@
 """Legacy route implementation for the Borgmatic API."""
 
 import base64
+import contextlib
 import json
 import os
 import re
@@ -288,6 +289,91 @@ def _run_borgmatic(args: List[str], env: Dict[str, str], job_id: str):
     threading.Thread(target=reader, args=(proc.stdout, "stdout"), daemon=True).start()
     threading.Thread(target=reader, args=(proc.stderr, "stderr"), daemon=True).start()
     return proc
+
+
+# =============================================================================
+# NEXTCLOUD AIO HELPERS
+# =============================================================================
+def _docker_exec_master(
+    command: List[str],
+    *,
+    env_vars: Optional[Dict[str, str]] = None,
+    timeout: int = 3600,
+) -> Dict[str, Any]:
+    """Run a command inside the Nextcloud AIO master container via docker exec."""
+
+    if not AIO_MASTER:
+        return {
+            "skipped": True,
+            "reason": "AIO master container not configured",
+        }
+
+    _validate_docker_exec(AIO_MASTER, command)
+
+    exec_args = ["docker", "exec"]
+    for key, value in sorted((env_vars or {}).items()):
+        exec_args += ["--env", f"{key}={value}"]
+    exec_args += [AIO_MASTER, *command]
+
+    env = os.environ.copy()
+    settings = _settings()
+    if settings.use_socket_proxy and settings.docker_host:
+        env["DOCKER_HOST"] = settings.docker_host
+
+    process = subprocess.run(
+        exec_args,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+    return {
+        "returncode": process.returncode,
+        "stdout": process.stdout,
+        "stderr": process.stderr,
+        "command": " ".join(command),
+        "env": env_vars or {},
+    }
+
+
+def _docker_exec_daily(
+    *,
+    args: Optional[List[str]] = None,
+    env_vars: Optional[Dict[str, str]] = None,
+    timeout: int = 3600,
+) -> Dict[str, Any]:
+    """Run `/daily-backup.sh` inside the Nextcloud AIO master container."""
+
+    if not AIO_DAILY:
+        return {
+            "skipped": True,
+            "reason": "AIO daily backup script not configured",
+        }
+
+    command = [AIO_DAILY]
+    if args:
+        command += list(args)
+
+    return _docker_exec_master(command, env_vars=env_vars, timeout=timeout)
+
+
+def _stop_official_daily_backup(timeout: int = 30) -> Dict[str, Any]:
+    """Ensure the official daily-backup.sh script is stopped before borgmatic runs."""
+
+    if not AIO_MASTER or not AIO_DAILY:
+        return {
+            "skipped": True,
+            "reason": "AIO master container or daily script not configured",
+        }
+
+    result = _docker_exec_daily(args=["stop"], timeout=timeout)
+    # Normaliser la sortie pour compatibilité rétro
+    return {
+        "returncode": result.get("returncode"),
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+    }
 
 
 # =============================================================================
@@ -590,6 +676,114 @@ def aio_running():
         return _json_error(400, "docker_error", str(e))
 
 
+@bp.route("/nextcloud/daily-backup/stop", methods=["POST"])
+@rate_limited(5, 60)
+def aio_daily_backup_stop():
+    """Expose `/daily-backup.sh stop` so Node-RED can ensure the lock is cleared."""
+
+    try:
+        _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        timeout = int(body.get("timeout", 30))
+
+        try:
+            result = _docker_exec_daily(args=["stop"], timeout=timeout)
+        except PermissionError as pe:
+            return _json_error(403, "exec_forbidden", str(pe))
+        except subprocess.TimeoutExpired:
+            return _json_error(
+                408,
+                "timeout",
+                f"daily-backup.sh stop timeout after {timeout}s",
+            )
+        except Exception as e:
+            details = _handle_docker_error("docker exec daily-backup stop", e)
+            return _json_error(503, **details)
+
+        return _json_ok({"result": result})
+    except Exception as e:
+        return _json_error(400, "exec_error", str(e))
+
+
+def _bool_env(value: Optional[Any], default: bool) -> str:
+    resolved = default if value is None else bool(value)
+    return "1" if resolved else "0"
+
+
+@bp.route("/nextcloud/daily-backup/run", methods=["POST"])
+@rate_limited(3, 300)
+def aio_daily_backup_run():
+    """Run the official Nextcloud workflow with explicit flags from Node-RED."""
+
+    try:
+        _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        timeout = int(body.get("timeout", 3600))
+        stop_timeout = int(body.get("stop_timeout", 30))
+
+        env_vars: Dict[str, str] = {}
+        env_vars["DAILY_BACKUP"] = _bool_env(body.get("daily_backup"), True)
+        env_vars["CHECK_BACKUP"] = _bool_env(body.get("check_backup"), False)
+        env_vars["STOP_CONTAINERS"] = _bool_env(body.get("stop_containers"), True)
+        env_vars["START_CONTAINERS"] = _bool_env(body.get("start_containers"), True)
+        env_vars["AUTOMATIC_UPDATES"] = _bool_env(
+            body.get("automatic_updates"), False
+        )
+        if body.get("lock_file_present") is not None:
+            env_vars["LOCK_FILE_PRESENT"] = _bool_env(
+                body.get("lock_file_present"), False
+            )
+        backup_password = body.get("backup_restore_password")
+        if backup_password:
+            env_vars["BACKUP_RESTORE_PASSWORD"] = str(backup_password)
+
+        extra_env = body.get("extra_env") or {}
+        if not isinstance(extra_env, dict):
+            return _json_error(400, "bad_request", "extra_env must be an object")
+        for key, value in extra_env.items():
+            env_vars[str(key)] = str(value)
+
+        pre_stop: Optional[Dict[str, Any]] = None
+        if body.get("with_stop", False):
+            try:
+                pre_stop = _docker_exec_daily(args=["stop"], timeout=stop_timeout)
+            except PermissionError as pe:
+                return _json_error(403, "exec_forbidden", str(pe))
+            except subprocess.TimeoutExpired:
+                return _json_error(
+                    408,
+                    "timeout",
+                    f"daily-backup.sh stop timeout after {stop_timeout}s",
+                )
+            except Exception as e:
+                details = _handle_docker_error("docker exec daily-backup stop", e)
+                return _json_error(503, **details)
+
+        try:
+            result = _docker_exec_daily(env_vars=env_vars, timeout=timeout)
+        except PermissionError as pe:
+            return _json_error(403, "exec_forbidden", str(pe))
+        except subprocess.TimeoutExpired:
+            return _json_error(
+                408,
+                "timeout",
+                f"daily-backup.sh timeout after {timeout}s",
+            )
+        except Exception as e:
+            details = _handle_docker_error("docker exec daily-backup", e)
+            return _json_error(503, **details)
+
+        payload = {"result": result}
+        if pre_stop is not None:
+            payload["pre_stop"] = pre_stop
+        payload["env"] = env_vars
+        return _json_ok(payload)
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
+    except Exception as e:
+        return _json_error(400, "exec_error", str(e))
+
+
 @bp.route("/nextcloud/official-daily-backup", methods=["POST"])
 @rate_limited(5, 60)
 def aio_official_daily_backup():
@@ -597,35 +791,45 @@ def aio_official_daily_backup():
     try:
         _require_auth(read_only=False)
         body = request.get_json(force=True, silent=True) or {}
-        env_args = []
-        for k in (
+        timeout = int(body.get("timeout", 3600))
+
+        env_vars: Dict[str, str] = {}
+        for key in (
             "STOP_CONTAINERS",
             "BACKUP_RESTORE_PASSWORD",
             "AUTOMATIC_UPDATES",
             "START_CONTAINERS",
         ):
-            v = body.get(k)
-            if v is not None:
-                env_args += ["--env", f"{k}={v}"]
+            if key in body and body[key] is not None:
+                env_vars[key] = str(body[key])
 
-        # VALIDATION SÉCURITÉ : Vérifier que la commande est autorisée
+        extra_env = body.get("extra_env") or {}
+        if not isinstance(extra_env, dict):
+            return _json_error(400, "bad_request", "extra_env must be an object")
+        for key, value in extra_env.items():
+            env_vars[str(key)] = str(value)
+
         try:
-            _validate_docker_exec(AIO_MASTER, [AIO_DAILY])
+            result = _docker_exec_daily(env_vars=env_vars, timeout=timeout)
         except PermissionError as pe:
             return _json_error(403, "exec_forbidden", str(pe))
-
-        args = ["docker", "exec"] + env_args + [AIO_MASTER, AIO_DAILY]
-
-        try:
-            p = subprocess.run(args, capture_output=True, text=True, timeout=3600)
-            return _json_ok(
-                {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
-            )
         except subprocess.TimeoutExpired:
-            return _json_error(408, "timeout", "daily-backup.sh timeout after 1h")
+            return _json_error(
+                408, "timeout", f"daily-backup.sh timeout after {timeout}s"
+            )
         except Exception as e:
             error_details = _handle_docker_error("docker exec daily-backup", e)
             return _json_error(503, **error_details)
+
+        return _json_ok(
+            {
+                "returncode": result.get("returncode"),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "command": result.get("command"),
+                "env": result.get("env", {}),
+            }
+        )
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -635,23 +839,29 @@ def aio_official_daily_backup():
 def aio_check_backup():
     try:
         _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        timeout = int(body.get("timeout", 600))
 
-        # VALIDATION SÉCURITÉ
         try:
-            _validate_docker_exec(AIO_MASTER, [AIO_HEALTH])
+            result = _docker_exec_master([AIO_HEALTH], timeout=timeout)
         except PermissionError as pe:
             return _json_error(403, "exec_forbidden", str(pe))
-
-        args = ["docker", "exec", AIO_MASTER, AIO_HEALTH]
-
-        try:
-            p = subprocess.run(args, capture_output=True, text=True, timeout=600)
-            return _json_ok(
-                {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+        except subprocess.TimeoutExpired:
+            return _json_error(
+                408, "timeout", f"healthcheck timeout after {timeout}s"
             )
         except Exception as e:
             error_details = _handle_docker_error("docker exec healthcheck", e)
             return _json_error(503, **error_details)
+
+        return _json_ok(
+            {
+                "returncode": result.get("returncode"),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "command": result.get("command"),
+            }
+        )
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
@@ -662,26 +872,90 @@ def aio_start_and_update():
     try:
         _require_auth(read_only=False)
         body = request.get_json(force=True, silent=True) or {}
-        env_args = ["--env", f"AUTOMATIC_UPDATES={body.get('AUTOMATIC_UPDATES','1')}"]
+        timeout = int(body.get("timeout", 3600))
 
-        # VALIDATION SÉCURITÉ
+        env_vars: Dict[str, str] = {}
+        if body.get("AUTOMATIC_UPDATES") is not None:
+            env_vars["AUTOMATIC_UPDATES"] = str(body.get("AUTOMATIC_UPDATES"))
+        else:
+            env_vars["AUTOMATIC_UPDATES"] = "1"
+
         try:
-            _validate_docker_exec(AIO_MASTER, [AIO_DAILY])
+            result = _docker_exec_daily(env_vars=env_vars, timeout=timeout)
         except PermissionError as pe:
             return _json_error(403, "exec_forbidden", str(pe))
-
-        args = ["docker", "exec"] + env_args + [AIO_MASTER, AIO_DAILY]
-
-        try:
-            p = subprocess.run(args, capture_output=True, text=True, timeout=3600)
-            return _json_ok(
-                {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+        except subprocess.TimeoutExpired:
+            return _json_error(
+                408, "timeout", f"daily-backup.sh timeout after {timeout}s"
             )
         except Exception as e:
             error_details = _handle_docker_error("docker exec start-and-update", e)
             return _json_error(503, **error_details)
+
+        return _json_ok(
+            {
+                "returncode": result.get("returncode"),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "command": result.get("command"),
+                "env": result.get("env", {}),
+            }
+        )
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
+
+
+@bp.route("/nextcloud/ports/probe", methods=["POST"])
+@rate_limited(20, 60)
+def aio_ports_probe():
+    """Probe a list of ports exposed by the Nextcloud AIO stack."""
+
+    try:
+        _require_auth(read_only=True)
+        body = request.get_json(force=True, silent=True) or {}
+        host = body.get("host", "127.0.0.1")
+        ports = body.get("ports") or [80, 8000, 8080, 8443, 9000, 9876]
+        timeout = float(body.get("timeout", 2))
+
+        results: List[Dict[str, Any]] = []
+        all_online = True
+
+        for port in ports:
+            try:
+                port_int = int(port)
+            except (TypeError, ValueError):
+                return _json_error(400, "bad_request", f"invalid port value: {port}")
+
+            start = time.time()
+            try:
+                with contextlib.closing(
+                    socket.create_connection((host, port_int), timeout=timeout)
+                ):
+                    pass
+                latency_ms = round((time.time() - start) * 1000, 2)
+                results.append(
+                    {"port": port_int, "online": True, "latency_ms": latency_ms}
+                )
+            except Exception as exc:
+                all_online = False
+                results.append(
+                    {
+                        "port": port_int,
+                        "online": False,
+                        "error": str(exc),
+                    }
+                )
+
+        return _json_ok(
+            {
+                "host": host,
+                "timeout": timeout,
+                "all_online": all_online,
+                "results": results,
+            }
+        )
+    except Exception as e:
+        return _json_error(400, "probe_error", str(e))
 
 
 @bp.route("/nextcloud/serverinfo", methods=["POST"])
@@ -1124,6 +1398,18 @@ def archive_create():
             env["SSH_ASKPASS_REQUIRE"] = "force"
             env["SSH_PASSPHRASE"] = ssh_passphrase
 
+        try:
+            stop_details = _stop_official_daily_backup()
+        except PermissionError as pe:
+            return _json_error(403, "exec_forbidden", str(pe))
+        except subprocess.TimeoutExpired:
+            return _json_error(408, "timeout", "daily-backup.sh stop timeout after 30s")
+        except Exception as e:
+            error_details = _handle_docker_error(
+                "docker exec daily-backup stop", e
+            )
+            return _json_error(503, **error_details)
+
         args = [
             "borgmatic",
             "--config",
@@ -1143,7 +1429,14 @@ def archive_create():
 
         sse_base = SSE_BASE_URL or request.host_url.rstrip("/")
         sse_url = f"{sse_base}/events/stream?kinds=stdout,stderr,status&job_id={job_id}"
-        return _json_ok({"job_id": job_id, "pid": proc.pid, "sse": sse_url})
+        return _json_ok(
+            {
+                "job_id": job_id,
+                "pid": proc.pid,
+                "sse": sse_url,
+                "official_daily_stop": stop_details,
+            }
+        )
 
     except ValueError as ve:
         return _json_error(400, "invalid_secrets", str(ve))
