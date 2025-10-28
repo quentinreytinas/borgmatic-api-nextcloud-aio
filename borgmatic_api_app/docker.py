@@ -73,8 +73,11 @@ def validate_docker_exec(
                     f"Shell interdit pour '{container}'. Commande refusée : {shell}"
                 )
 
-    lowered = command_str.lower()
-    blocked = [dangerous for dangerous in settings.dangerous_commands if dangerous in lowered]
+    blocked = [
+        dangerous
+        for dangerous in settings.dangerous_commands
+        if any(dangerous == part.lower() for part in command)
+    ]
     if blocked:
         forbidden = ", ".join(sorted(set(blocked)))
         raise PermissionError(
