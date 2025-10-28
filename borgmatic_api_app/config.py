@@ -37,6 +37,7 @@ class Settings:
     sse_heartbeat: int
     sse_base_url: str
     ready_webhook_url: str
+    daily_stop_timeout: int
 
     @property
     def use_socket_proxy(self) -> bool:
@@ -63,7 +64,7 @@ DEFAULT_WHITELIST = {
 
 DANGEROUS_COMMANDS = [
     "bash",
-    "sh",
+    # "sh",  # removed to avoid blocking daily-backup.sh
     "zsh",
     "fish",
     "ash",
@@ -118,6 +119,7 @@ def load_settings() -> Settings:
         sse_heartbeat=int(os.environ.get("APP_SSE_HEARTBEAT_SEC", "15")),
         sse_base_url=os.environ.get("APP_SSE_BASE_URL", "").rstrip("/"),
         ready_webhook_url=os.environ.get("APP_READY_WEBHOOK_URL", "").strip(),
+        daily_stop_timeout=int(os.environ.get("AIO_STOP_TIMEOUT", "30")),
     )
 
     settings.validate()

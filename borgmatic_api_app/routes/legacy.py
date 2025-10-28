@@ -358,7 +358,7 @@ def _docker_exec_daily(
     return _docker_exec_master(command, env_vars=env_vars, timeout=timeout)
 
 
-def _stop_official_daily_backup(timeout: int = 30) -> Dict[str, Any]:
+def _stop_official_daily_backup(timeout: Optional[int] = None) -> Dict[str, Any]:
     """Ensure the official daily-backup.sh script is stopped before borgmatic runs."""
 
     if not AIO_MASTER or not AIO_DAILY:
@@ -366,6 +366,9 @@ def _stop_official_daily_backup(timeout: int = 30) -> Dict[str, Any]:
             "skipped": True,
             "reason": "AIO master container or daily script not configured",
         }
+
+    if timeout is None:
+        timeout = _settings().daily_stop_timeout
 
     result = _docker_exec_daily(args=["stop"], timeout=timeout)
     # Normaliser la sortie pour compatibilité rétro
@@ -395,39 +398,57 @@ def index():
     )
 
 
+def _gather_health_checks() -> tuple[str, Dict[str, Any]]:
+    checks: Dict[str, Any] = {
+        "api": "ok",
+        "docker": "unknown",
+        "borgmatic": "unknown",
+        "ssh": "unknown",
+    }
+
+    # Docker (via Socket Proxy ou direct)
+    docker_ok, docker_msg = _check_docker_available()
+    checks["docker"] = "ok" if docker_ok else "error"
+    checks["docker_details"] = docker_msg
+
+    # borgmatic
+    try:
+        p = subprocess.run(
+            ["borgmatic", "--version"], capture_output=True, text=True, timeout=3
+        )
+        checks["borgmatic"] = "ok" if p.returncode == 0 else "error"
+    except Exception:
+        checks["borgmatic"] = "error"
+
+    # ssh dir
+    checks["ssh"] = "ok" if Path(BORG_SSH_DIR).exists() else "error"
+
+    overall = (
+        "healthy"
+        if all(value == "ok" for key, value in checks.items() if not key.endswith("_details"))
+        else "degraded"
+    )
+    return overall, checks
+
+
 @bp.route("/health")
 def health():
     try:
         _require_auth(read_only=True)
-        checks = {
-            "api": "ok",
-            "docker": "unknown",
-            "borgmatic": "unknown",
-            "ssh": "unknown",
-        }
+    except PermissionError as exc:
+        return _json_error(401, "unauthorized", str(exc))
 
-        # Docker (via Socket Proxy ou direct)
-        docker_ok, docker_msg = _check_docker_available()
-        checks["docker"] = "ok" if docker_ok else "error"
-        checks["docker_details"] = docker_msg
+    try:
+        overall, checks = _gather_health_checks()
+        return _json_ok({"status": overall, "checks": checks})
+    except Exception as e:
+        return _json_error(500, "health_check_failed", str(e))
 
-        # borgmatic
-        try:
-            p = subprocess.run(
-                ["borgmatic", "--version"], capture_output=True, text=True, timeout=3
-            )
-            checks["borgmatic"] = "ok" if p.returncode == 0 else "error"
-        except Exception:
-            checks["borgmatic"] = "error"
 
-        # ssh dir
-        checks["ssh"] = "ok" if Path(BORG_SSH_DIR).exists() else "error"
-
-        overall = (
-            "healthy"
-            if all(v == "ok" for k, v in checks.items() if not k.endswith("_details"))
-            else "degraded"
-        )
+@bp.route("/health/public")
+def health_public():
+    try:
+        overall, checks = _gather_health_checks()
         return _json_ok({"status": overall, "checks": checks})
     except Exception as e:
         return _json_error(500, "health_check_failed", str(e))
@@ -1398,12 +1419,30 @@ def archive_create():
             env["SSH_ASKPASS_REQUIRE"] = "force"
             env["SSH_PASSPHRASE"] = ssh_passphrase
 
+        stop_timeout_raw = body.get("stop_timeout")
         try:
-            stop_details = _stop_official_daily_backup()
+            stop_timeout = (
+                int(stop_timeout_raw) if stop_timeout_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            return _json_error(400, "bad_request", "stop_timeout must be an integer")
+
+        effective_stop_timeout = (
+            stop_timeout
+            if stop_timeout is not None
+            else _settings().daily_stop_timeout
+        )
+
+        try:
+            stop_details = _stop_official_daily_backup(timeout=stop_timeout)
         except PermissionError as pe:
             return _json_error(403, "exec_forbidden", str(pe))
         except subprocess.TimeoutExpired:
-            return _json_error(408, "timeout", "daily-backup.sh stop timeout after 30s")
+            return _json_error(
+                408,
+                "timeout",
+                f"daily-backup.sh stop timeout after {effective_stop_timeout}s",
+            )
         except Exception as e:
             error_details = _handle_docker_error(
                 "docker exec daily-backup stop", e
