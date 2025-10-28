@@ -49,6 +49,55 @@ def test_metrics_requires_authentication(app):
     assert response.status_code == 401
 
 
+def test_health_requires_authentication(app):
+    client = app.test_client()
+
+    response = client.get("/health")
+
+    assert response.status_code == 401
+    payload = response.get_json()
+    assert payload["error"] == "unauthorized"
+
+
+def test_health_endpoint_returns_checks(monkeypatch, app):
+    client = app.test_client()
+
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._gather_health_checks",
+        lambda: ("healthy", {"api": "ok", "docker": "ok"}),
+    )
+
+    response = client.get("/health", headers=auth_headers())
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "healthy"
+    assert payload["checks"]["api"] == "ok"
+
+
+def test_public_health_endpoint_available_without_auth(monkeypatch, app):
+    client = app.test_client()
+
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._gather_health_checks",
+        lambda: (
+            "degraded",
+            {
+                "api": "ok",
+                "docker": "error",
+                "docker_details": "no daemon",
+            },
+        ),
+    )
+
+    response = client.get("/health/public")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "degraded"
+    assert payload["checks"]["docker_details"] == "no daemon"
+
+
 def test_daily_backup_stop_endpoint_executes_docker(monkeypatch, app):
     client = app.test_client()
     recorded = {}

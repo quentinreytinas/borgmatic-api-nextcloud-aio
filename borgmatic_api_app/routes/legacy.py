@@ -395,39 +395,57 @@ def index():
     )
 
 
+def _gather_health_checks() -> tuple[str, Dict[str, Any]]:
+    checks: Dict[str, Any] = {
+        "api": "ok",
+        "docker": "unknown",
+        "borgmatic": "unknown",
+        "ssh": "unknown",
+    }
+
+    # Docker (via Socket Proxy ou direct)
+    docker_ok, docker_msg = _check_docker_available()
+    checks["docker"] = "ok" if docker_ok else "error"
+    checks["docker_details"] = docker_msg
+
+    # borgmatic
+    try:
+        p = subprocess.run(
+            ["borgmatic", "--version"], capture_output=True, text=True, timeout=3
+        )
+        checks["borgmatic"] = "ok" if p.returncode == 0 else "error"
+    except Exception:
+        checks["borgmatic"] = "error"
+
+    # ssh dir
+    checks["ssh"] = "ok" if Path(BORG_SSH_DIR).exists() else "error"
+
+    overall = (
+        "healthy"
+        if all(value == "ok" for key, value in checks.items() if not key.endswith("_details"))
+        else "degraded"
+    )
+    return overall, checks
+
+
 @bp.route("/health")
 def health():
     try:
         _require_auth(read_only=True)
-        checks = {
-            "api": "ok",
-            "docker": "unknown",
-            "borgmatic": "unknown",
-            "ssh": "unknown",
-        }
+    except PermissionError as exc:
+        return _json_error(401, "unauthorized", str(exc))
 
-        # Docker (via Socket Proxy ou direct)
-        docker_ok, docker_msg = _check_docker_available()
-        checks["docker"] = "ok" if docker_ok else "error"
-        checks["docker_details"] = docker_msg
+    try:
+        overall, checks = _gather_health_checks()
+        return _json_ok({"status": overall, "checks": checks})
+    except Exception as e:
+        return _json_error(500, "health_check_failed", str(e))
 
-        # borgmatic
-        try:
-            p = subprocess.run(
-                ["borgmatic", "--version"], capture_output=True, text=True, timeout=3
-            )
-            checks["borgmatic"] = "ok" if p.returncode == 0 else "error"
-        except Exception:
-            checks["borgmatic"] = "error"
 
-        # ssh dir
-        checks["ssh"] = "ok" if Path(BORG_SSH_DIR).exists() else "error"
-
-        overall = (
-            "healthy"
-            if all(v == "ok" for k, v in checks.items() if not k.endswith("_details"))
-            else "degraded"
-        )
+@bp.route("/health/public")
+def health_public():
+    try:
+        overall, checks = _gather_health_checks()
         return _json_ok({"status": overall, "checks": checks})
     except Exception as e:
         return _json_error(500, "health_check_failed", str(e))
