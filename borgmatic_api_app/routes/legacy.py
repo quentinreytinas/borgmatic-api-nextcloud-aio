@@ -358,7 +358,7 @@ def _docker_exec_daily(
     return _docker_exec_master(command, env_vars=env_vars, timeout=timeout)
 
 
-def _stop_official_daily_backup(timeout: int = 30) -> Dict[str, Any]:
+def _stop_official_daily_backup(timeout: Optional[int] = None) -> Dict[str, Any]:
     """Ensure the official daily-backup.sh script is stopped before borgmatic runs."""
 
     if not AIO_MASTER or not AIO_DAILY:
@@ -366,6 +366,9 @@ def _stop_official_daily_backup(timeout: int = 30) -> Dict[str, Any]:
             "skipped": True,
             "reason": "AIO master container or daily script not configured",
         }
+
+    if timeout is None:
+        timeout = _settings().daily_stop_timeout
 
     result = _docker_exec_daily(args=["stop"], timeout=timeout)
     # Normaliser la sortie pour compatibilité rétro
@@ -1416,12 +1419,30 @@ def archive_create():
             env["SSH_ASKPASS_REQUIRE"] = "force"
             env["SSH_PASSPHRASE"] = ssh_passphrase
 
+        stop_timeout_raw = body.get("stop_timeout")
         try:
-            stop_details = _stop_official_daily_backup()
+            stop_timeout = (
+                int(stop_timeout_raw) if stop_timeout_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            return _json_error(400, "bad_request", "stop_timeout must be an integer")
+
+        effective_stop_timeout = (
+            stop_timeout
+            if stop_timeout is not None
+            else _settings().daily_stop_timeout
+        )
+
+        try:
+            stop_details = _stop_official_daily_backup(timeout=stop_timeout)
         except PermissionError as pe:
             return _json_error(403, "exec_forbidden", str(pe))
         except subprocess.TimeoutExpired:
-            return _json_error(408, "timeout", "daily-backup.sh stop timeout after 30s")
+            return _json_error(
+                408,
+                "timeout",
+                f"daily-backup.sh stop timeout after {effective_stop_timeout}s",
+            )
         except Exception as e:
             error_details = _handle_docker_error(
                 "docker exec daily-backup stop", e
