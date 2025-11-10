@@ -433,7 +433,11 @@ def _gather_health_checks() -> tuple[str, Dict[str, Any]]:
 
     overall = (
         "healthy"
-        if all(value == "ok" for key, value in checks.items() if not key.endswith("_details"))
+        if all(
+            value == "ok"
+            for key, value in checks.items()
+            if not key.endswith("_details")
+        )
         else "degraded"
     )
     return overall, checks
@@ -755,9 +759,7 @@ def aio_daily_backup_run():
         env_vars["CHECK_BACKUP"] = _bool_env(body.get("check_backup"), False)
         env_vars["STOP_CONTAINERS"] = _bool_env(body.get("stop_containers"), True)
         env_vars["START_CONTAINERS"] = _bool_env(body.get("start_containers"), True)
-        env_vars["AUTOMATIC_UPDATES"] = _bool_env(
-            body.get("automatic_updates"), False
-        )
+        env_vars["AUTOMATIC_UPDATES"] = _bool_env(body.get("automatic_updates"), False)
         if body.get("lock_file_present") is not None:
             env_vars["LOCK_FILE_PRESENT"] = _bool_env(
                 body.get("lock_file_present"), False
@@ -876,9 +878,7 @@ def aio_check_backup():
         except PermissionError as pe:
             return _json_error(403, "exec_forbidden", str(pe))
         except subprocess.TimeoutExpired:
-            return _json_error(
-                408, "timeout", f"healthcheck timeout after {timeout}s"
-            )
+            return _json_error(408, "timeout", f"healthcheck timeout after {timeout}s")
         except Exception as e:
             error_details = _handle_docker_error("docker exec healthcheck", e)
             return _json_error(503, **error_details)
@@ -1438,9 +1438,7 @@ def archive_create():
             return _json_error(400, "bad_request", "stop_timeout must be an integer")
 
         effective_stop_timeout = (
-            stop_timeout
-            if stop_timeout is not None
-            else _settings().daily_stop_timeout
+            stop_timeout if stop_timeout is not None else _settings().daily_stop_timeout
         )
 
         try:
@@ -1454,9 +1452,7 @@ def archive_create():
                 f"daily-backup.sh stop timeout after {effective_stop_timeout}s",
             )
         except Exception as e:
-            error_details = _handle_docker_error(
-                "docker exec daily-backup stop", e
-            )
+            error_details = _handle_docker_error("docker exec daily-backup stop", e)
             return _json_error(503, **error_details)
 
         args = [

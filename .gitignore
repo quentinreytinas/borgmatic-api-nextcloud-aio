@@ -29,6 +29,7 @@ backup/
 __pycache__/
 *.py[cod]
 venv/
+.venv/
 
 # Docker
 .dockerignore

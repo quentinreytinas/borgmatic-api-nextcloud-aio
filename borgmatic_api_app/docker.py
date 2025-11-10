@@ -80,9 +80,7 @@ def validate_docker_exec(
     ]
     if blocked:
         forbidden = ", ".join(sorted(set(blocked)))
-        raise PermissionError(
-            f"La commande contient {forbidden}, ce qui est interdit"
-        )
+        raise PermissionError(f"La commande contient {forbidden}, ce qui est interdit")
 
     allowed = config.commands
     if allowed:
