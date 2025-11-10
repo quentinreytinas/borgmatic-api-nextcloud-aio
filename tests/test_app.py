@@ -1,11 +1,12 @@
-from pathlib import Path
-import subprocess
-
 import pytest
 
-pytest.importorskip("flask")
+try:
+    from borgmatic_api_app import create_app
+except ModuleNotFoundError:  # pragma: no cover - handled in CI without Flask
+    create_app = None
 
-from borgmatic_api_app import create_app
+if create_app is None:  # pragma: no cover - skip tests when Flask missing
+    pytest.skip("Flask is required to run API tests", allow_module_level=True)
 
 
 @pytest.fixture()
