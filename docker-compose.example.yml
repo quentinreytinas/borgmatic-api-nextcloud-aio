@@ -165,7 +165,7 @@ services:
       # === Volumes Nextcloud AIO (lecture seule) ===
       - nextcloud_aio_mastercontainer:/nextcloud_aio_volumes/nextcloud_aio_mastercontainer:ro
       - nextcloud_aio_nextcloud:/nextcloud_aio_volumes/nextcloud_aio_nextcloud:ro
-      - nextcloud_aio_nextcloud:/nextcloud_aio_volumes/nextcloud_aio_nextcloud_data:ro
+      - nextcloud_aio_nextcloud_data:/nextcloud_aio_volumes/nextcloud_aio_nextcloud_data:ro
       - nextcloud_aio_database:/nextcloud_aio_volumes/nextcloud_aio_database:ro
       - nextcloud_aio_database_dump:/nextcloud_aio_volumes/nextcloud_aio_database_dump:ro
       - nextcloud_aio_redis:/nextcloud_aio_volumes/nextcloud_aio_redis:ro
@@ -193,7 +193,8 @@ volumes:
     external: true
   nextcloud_aio_nextcloud:
     external: true
-  nextcloud_aio_nextcloud:
+  nextcloud_aio_nextcloud_data:
+    external: true
     external: true
   nextcloud_aio_database:
     external: true

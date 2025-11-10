@@ -7,9 +7,11 @@ secrets/
 *.secret
 config.json
 !.env.example
-# Configuration locale RÉELLE
-docker-compose.yml        # ← Votre config avec vrais tokens
+# Configuration locale RÉELLE (ne jamais committer)
+docker-compose.yml
 docker-compose.override.yml
+docker-compose.*.yml
+!docker-compose.example.yml
 
 # Borgmatic configs (peuvent contenir secrets)
 borgmatic.d/

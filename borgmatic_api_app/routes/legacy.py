@@ -107,6 +107,14 @@ def _handle_docker_error(operation: str, error: Exception) -> Dict[str, Any]:
     return handle_docker_error(_settings(), operation, error)
 
 
+def _merge_env(extra: Dict[str, str]) -> Dict[str, str]:
+    """Return a copy of os.environ updated with the provided variables."""
+
+    env = os.environ.copy()
+    env.update(extra)
+    return env
+
+
 # =============================================================================
 # HELPERS: JSON / AUTH / CONFIG RESOLUTION
 # =============================================================================
@@ -1284,6 +1292,7 @@ def repo_archives_list(label: str):
         if ssh_passphrase:
             env["SSH_ASKPASS"] = "echo"
             env["SSH_PASSPHRASE"] = ssh_passphrase
+        env = _merge_env(env)
         args = ["borgmatic", "--config", str(cfg), "info", "--json"]
         _validate_borgmatic_args(args)
         p = subprocess.run(
@@ -1375,6 +1384,7 @@ def repo_passphrase_change(label: str):
 
         args = ["borgmatic", "--config", str(cfg), "key", "change-passphrase"]
         _validate_borgmatic_args(args)
+        env = _merge_env(env)
         p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=180)
         return _json_ok(
             {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
@@ -1529,6 +1539,7 @@ def archive_create_dry_run():
             args += ["--progress"]
         _validate_borgmatic_args(args)
 
+        env = _merge_env(env)
         p = subprocess.run(
             args, capture_output=True, text=True, env=env, timeout=timeout_sec
         )
@@ -1587,6 +1598,7 @@ def archive_extract():
             args.append(str(pth))
         _validate_borgmatic_args(args)
 
+        env = _merge_env(env)
         p = subprocess.run(
             args,
             capture_output=True,
@@ -1659,6 +1671,7 @@ def archive_mount():
             args += ["--options", str(body["options"])]
         _validate_borgmatic_args(args)
 
+        env = _merge_env(env)
         p = subprocess.run(
             args, capture_output=True, text=True, env=env, timeout=timeout_sec
         )
@@ -1698,6 +1711,7 @@ def archive_umount():
         args = ["borgmatic", "umount", "--mount-point", str(mount_point)]
         _validate_borgmatic_args(args)
 
+        env = _merge_env(env)
         p = subprocess.run(
             args, capture_output=True, text=True, env=env, timeout=timeout_sec
         )
@@ -2173,6 +2187,7 @@ def ssh_test(label: str):
             env["SSH_PASSPHRASE"] = ssh_passphrase
         args = ["borgmatic", "--config", str(cfg), "info"]
         _validate_borgmatic_args(args)
+        env = _merge_env(env)
         p = subprocess.run(args, capture_output=True, text=True, env=env, timeout=30)
         return _json_ok(
             {"returncode": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
