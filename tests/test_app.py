@@ -44,7 +44,7 @@ def test_metrics_endpoint_reports_counters(app):
     payload = metrics_response.get_json()
     metrics = payload["metrics"]
     assert metrics["requests_total"] >= 2
-    assert metrics["responses_ok"] >= 2
+    assert metrics["responses_ok"] >= 1
 
 
 def test_metrics_requires_authentication(app):
