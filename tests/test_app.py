@@ -250,6 +250,7 @@ def test_ports_probe_reports_results(monkeypatch, app):
 # Security tests
 # =============================================================================
 
+
 def test_security_headers_present(app):
     """Each response must include basic security headers."""
     client = app.test_client()
@@ -278,7 +279,10 @@ def test_ssh_create_rejects_invalid_label(app):
             json={},
             headers=auth_headers(write=True),
         )
-        assert response.status_code in (400, 404), f"Expected 400/404 for label {bad_label!r}"
+        assert response.status_code in (
+            400,
+            404,
+        ), f"Expected 400/404 for label {bad_label!r}"
 
 
 def test_ssh_pub_rejects_invalid_label(app):
