@@ -64,7 +64,7 @@ DEFAULT_WHITELIST = {
 
 DANGEROUS_COMMANDS = [
     "bash",
-    # "sh",  # removed to avoid blocking daily-backup.sh
+    "sh",
     "zsh",
     "fish",
     "ash",

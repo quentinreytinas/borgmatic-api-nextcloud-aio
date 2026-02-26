@@ -164,6 +164,12 @@ def _enforce_distinct_pass(borg_pass: Optional[str], ssh_pass: Optional[str]):
 # --- Résolution unifiée des configs (.yaml/.yml) + garde-fou label ---
 SAFE_LABEL_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 
+# Répertoires autorisés pour les destinations d'extraction/montage
+_ALLOWED_DEST_BASES = (Path("/tmp"), Path("/mnt"))
+
+# Borne max pour process_timeout (secondes)
+_MAX_PROCESS_TIMEOUT_SEC = 3600
+
 
 def _resolve_config(label: str) -> Path:
     """
@@ -178,6 +184,47 @@ def _resolve_config(label: str) -> Path:
         if p.exists():
             return p
     raise FileNotFoundError(f"Config {label} not found")
+
+
+def _validate_ssh_label(label: str) -> None:
+    """Valide le label utilisé dans les chemins de clés SSH."""
+    if not SAFE_LABEL_RE.match(label):
+        raise ValueError(
+            "Invalid label format: only alphanumeric, dots, underscores and hyphens allowed"
+        )
+
+
+def _validate_dest_path(path: str, description: str = "destination") -> Path:
+    """
+    Valide qu'un chemin de destination est dans un répertoire autorisé (/tmp ou /mnt).
+    Lève ValueError si le chemin est hors des zones autorisées.
+    """
+    try:
+        resolved = Path(path).resolve()
+    except Exception:
+        raise ValueError(f"Invalid {description} path")
+    for base in _ALLOWED_DEST_BASES:
+        base_resolved = base.resolve()
+        if resolved == base_resolved or base_resolved in resolved.parents:
+            return resolved
+    allowed = ", ".join(str(b) for b in _ALLOWED_DEST_BASES)
+    raise ValueError(f"{description} must be within {allowed}")
+
+
+def _parse_timeout(body: Dict[str, Any], default: int = 60) -> int:
+    """
+    Lit process_timeout dans le body et valide qu'il est dans [1, _MAX_PROCESS_TIMEOUT_SEC].
+    Lève ValueError si invalide.
+    """
+    try:
+        t = int(body.get("process_timeout", default))
+    except (TypeError, ValueError):
+        raise ValueError("process_timeout must be an integer")
+    if not 1 <= t <= _MAX_PROCESS_TIMEOUT_SEC:
+        raise ValueError(
+            f"process_timeout must be between 1 and {_MAX_PROCESS_TIMEOUT_SEC} seconds"
+        )
+    return t
 
 
 # =============================================================================
@@ -1077,7 +1124,10 @@ def config_validate_one(label: str):
     try:
         _require_auth(read_only=True)
         body = request.get_json(force=True, silent=True) or {}
-        process_timeout = int(body.get("process_timeout", 60))
+        try:
+            process_timeout = _parse_timeout(body, default=60)
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
         try:
             path = _resolve_config(label)
         except FileNotFoundError as e:
@@ -1295,12 +1345,16 @@ def repo_archives_list(label: str):
         env = _merge_env(env)
         args = ["borgmatic", "--config", str(cfg), "info", "--json"]
         _validate_borgmatic_args(args)
+        try:
+            repo_timeout = _parse_timeout(body, default=60)
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
         p = subprocess.run(
             args,
             capture_output=True,
             text=True,
             env=env,
-            timeout=int(body.get("process_timeout", 60)),
+            timeout=repo_timeout,
         )
         try:
             data = json.loads(p.stdout or "{}")
@@ -1502,7 +1556,10 @@ def archive_create_dry_run():
         verbosity = str(body.get("verbosity", 1))
         stats = bool(body.get("stats", False))
         progress = bool(body.get("progress", False))
-        timeout_sec = int(body.get("process_timeout", 60))
+        try:
+            timeout_sec = _parse_timeout(body, default=60)
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
 
         _enforce_distinct_pass(borg_passphrase, ssh_passphrase)
         if not repository:
@@ -1562,11 +1619,19 @@ def archive_extract():
         paths = body.get("paths") or []
         borg_pass = body.get("borg_passphrase")
         ssh_pass = body.get("ssh_passphrase")
-        timeout_sec = int(body.get("process_timeout", 600))
+        try:
+            timeout_sec = _parse_timeout(body, default=600)
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
 
         _enforce_distinct_pass(borg_pass, ssh_pass)
         if not (repo and archive):
             return _json_error(400, "bad_request", "repository & archive required")
+
+        try:
+            dest_resolved = _validate_dest_path(dest, "destination")
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
 
         try:
             cfg_path = _resolve_config(repo)
@@ -1580,7 +1645,7 @@ def archive_extract():
             env["SSH_ASKPASS"] = "echo"
             env["SSH_PASSPHRASE"] = ssh_pass
 
-        Path(dest).mkdir(parents=True, exist_ok=True)
+        dest_resolved.mkdir(parents=True, exist_ok=True)
 
         args = [
             "borgmatic",
@@ -1601,14 +1666,14 @@ def archive_extract():
             text=True,
             env=env,
             timeout=timeout_sec,
-            cwd=str(dest),
+            cwd=str(dest_resolved),
         )
         return _json_ok(
             {
                 "returncode": p.returncode,
                 "stdout": p.stdout,
                 "stderr": p.stderr,
-                "destination": dest,
+                "destination": str(dest_resolved),
             }
         )
     except subprocess.TimeoutExpired as te:
@@ -1631,13 +1696,21 @@ def archive_mount():
             body.get("mount_point"),
         )
         borg_pass, ssh_pass = body.get("borg_passphrase"), body.get("ssh_passphrase")
-        timeout_sec = int(body.get("process_timeout", 600))
+        try:
+            timeout_sec = _parse_timeout(body, default=600)
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
 
         _enforce_distinct_pass(borg_pass, ssh_pass)
         if not (repo and archive and mount_point):
             return _json_error(
                 400, "bad_request", "repository, archive, mount_point required"
             )
+
+        try:
+            mp_resolved = _validate_dest_path(mount_point, "mount_point")
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
 
         try:
             cfg_path = _resolve_config(repo)
@@ -1651,7 +1724,7 @@ def archive_mount():
             env["SSH_ASKPASS"] = "echo"
             env["SSH_PASSPHRASE"] = ssh_pass
 
-        Path(mount_point).mkdir(parents=True, exist_ok=True)
+        mp_resolved.mkdir(parents=True, exist_ok=True)
 
         args = [
             "borgmatic",
@@ -1661,7 +1734,7 @@ def archive_mount():
             "--archive",
             str(archive),
             "--mount-point",
-            str(mount_point),
+            str(mp_resolved),
         ]
         if body.get("options"):
             args += ["--options", str(body["options"])]
@@ -1691,7 +1764,10 @@ def archive_umount():
         mount_point = body.get("mount_point")
         borg_pass = body.get("borg_passphrase")
         ssh_pass = body.get("ssh_passphrase")
-        timeout_sec = int(body.get("process_timeout", 120))
+        try:
+            timeout_sec = _parse_timeout(body, default=120)
+        except ValueError as ve:
+            return _json_error(400, "bad_request", str(ve))
 
         _enforce_distinct_pass(borg_pass, ssh_pass)
         if not mount_point:
@@ -2051,6 +2127,7 @@ def ssh_status(label: str):
 def ssh_pub(label: str):
     try:
         _require_auth(read_only=True)
+        _validate_ssh_label(label)
         pub = Path(BORG_SSH_DIR) / f"id_{label}.pub"
         if not pub.exists():
             return _json_error(404, "not_found", f"SSH key {label} not found")
@@ -2061,6 +2138,8 @@ def ssh_pub(label: str):
         if restrict:
             auth_line = f'command="borg serve --restrict-to-path {restrict}",restrict {content} {comment}'
         return _json_ok({"public": content, "authorized_keys": auth_line})
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "read_error", str(e))
 
@@ -2070,9 +2149,9 @@ def ssh_pub(label: str):
 def ssh_create(label: str):
     try:
         _require_auth(read_only=False)
+        _validate_ssh_label(label)
         body = request.get_json(force=True, silent=True) or {}
         ssh_passphrase = body.get("ssh_passphrase") or ""
-        _enforce_distinct_pass("dummy", ssh_passphrase)
         prv = Path(BORG_SSH_DIR) / f"id_{label}"
         pub = Path(BORG_SSH_DIR) / f"id_{label}.pub"
         prv.parent.mkdir(parents=True, exist_ok=True)
@@ -2107,6 +2186,7 @@ def ssh_create(label: str):
 def ssh_delete(label: str):
     try:
         _require_auth(read_only=False)
+        _validate_ssh_label(label)
         prv = Path(BORG_SSH_DIR) / f"id_{label}"
         pub = Path(BORG_SSH_DIR) / f"id_{label}.pub"
         ok = False
@@ -2124,9 +2204,9 @@ def ssh_delete(label: str):
 def ssh_replace(label: str):
     try:
         _require_auth(read_only=False)
+        _validate_ssh_label(label)
         body = request.get_json(force=True, silent=True) or {}
         ssh_passphrase = body.get("ssh_passphrase") or ""
-        _enforce_distinct_pass("dummy", ssh_passphrase)
         prv = Path(BORG_SSH_DIR) / f"id_{label}"
         pub = Path(BORG_SSH_DIR) / f"id_{label}.pub"
         if prv.exists():

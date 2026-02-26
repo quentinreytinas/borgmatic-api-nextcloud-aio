@@ -244,3 +244,144 @@ def test_ports_probe_reports_results(monkeypatch, app):
     assert online_result["online"] is True
     assert offline_result["online"] is False
     assert "refused" in offline_result["error"]
+
+
+# =============================================================================
+# Security tests
+# =============================================================================
+
+def test_security_headers_present(app):
+    """Each response must include basic security headers."""
+    client = app.test_client()
+    response = client.get("/health/public")
+    assert response.headers.get("X-Content-Type-Options") == "nosniff"
+    assert response.headers.get("X-Frame-Options") == "DENY"
+    assert response.headers.get("X-XSS-Protection") == "1; mode=block"
+
+
+def test_auth_rejects_empty_bearer_token(app):
+    """An empty Bearer token must be rejected with 401."""
+    client = app.test_client()
+    response = client.get(
+        "/health",
+        headers={"Authorization": "Bearer ", "X-From-NodeRed": "NodeRED-Internal"},
+    )
+    assert response.status_code == 401
+
+
+def test_ssh_create_rejects_invalid_label(app):
+    """SSH key creation must reject labels containing path traversal characters."""
+    client = app.test_client()
+    for bad_label in ("../evil", "../../etc/passwd", "label/sub", "label\x00null"):
+        response = client.post(
+            f"/ssh-keys/{bad_label}",
+            json={},
+            headers=auth_headers(write=True),
+        )
+        assert response.status_code in (400, 404), f"Expected 400/404 for label {bad_label!r}"
+
+
+def test_ssh_pub_rejects_invalid_label(app):
+    """SSH pub endpoint must reject labels containing path traversal characters."""
+    client = app.test_client()
+    response = client.get(
+        "/ssh-keys/../evil/pub",
+        headers=auth_headers(),
+    )
+    assert response.status_code in (400, 404)
+
+
+def test_archive_extract_rejects_path_traversal(monkeypatch, app):
+    """archive_extract must refuse destinations outside /tmp or /mnt."""
+    client = app.test_client()
+
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._resolve_config",
+        lambda label: __import__("pathlib").Path("/etc/borgmatic.d/test.yaml"),
+    )
+
+    response = client.post(
+        "/archives/extract",
+        json={
+            "repository": "test",
+            "archive": "latest",
+            "destination": "/root/.ssh",
+        },
+        headers=auth_headers(write=True),
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"] == "bad_request"
+
+
+def test_archive_extract_rejects_etc_traversal(monkeypatch, app):
+    """archive_extract must refuse /etc as destination."""
+    client = app.test_client()
+
+    response = client.post(
+        "/archives/extract",
+        json={
+            "repository": "test",
+            "archive": "latest",
+            "destination": "/etc/cron.d",
+        },
+        headers=auth_headers(write=True),
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"] == "bad_request"
+
+
+def test_process_timeout_out_of_range_rejected(app):
+    """process_timeout above 3600 must be rejected with 400."""
+    client = app.test_client()
+    response = client.post(
+        "/config/validate/test",
+        json={"process_timeout": 99999},
+        headers=auth_headers(),
+    )
+    # Will 404 (config not found) or 400 depending on validation order;
+    # the timeout error must not cause an unhandled 500.
+    assert response.status_code in (400, 404)
+    if response.status_code == 400:
+        payload = response.get_json()
+        assert payload["error"] == "bad_request"
+
+
+def test_docker_exec_blocks_shell_via_absolute_path():
+    """validate_docker_exec must block /bin/sh even when 'sh' is checked by basename."""
+    from borgmatic_api_app.docker import validate_docker_exec
+    from borgmatic_api_app.config import load_settings
+    import os
+
+    os.environ.setdefault("API_TOKEN", "t")
+    os.environ.setdefault("API_READ_TOKEN", "t")
+    settings = load_settings()
+
+    # /bin/sh is a shell — must be blocked for no_shell containers
+    try:
+        validate_docker_exec(
+            settings, "nextcloud-aio-mastercontainer", ["/bin/sh", "-c", "id"]
+        )
+        assert False, "Expected PermissionError for /bin/sh"
+    except PermissionError:
+        pass
+
+
+def test_docker_exec_allows_daily_backup_script():
+    """validate_docker_exec must allow /daily-backup.sh (not a shell by basename)."""
+    from borgmatic_api_app.docker import validate_docker_exec
+    from borgmatic_api_app.config import load_settings
+    import os
+
+    os.environ.setdefault("API_TOKEN", "t")
+    os.environ.setdefault("API_READ_TOKEN", "t")
+    settings = load_settings()
+
+    # /daily-backup.sh must pass (it's in the whitelist and is not a shell)
+    try:
+        validate_docker_exec(
+            settings, "nextcloud-aio-mastercontainer", ["/daily-backup.sh"]
+        )
+    except PermissionError as e:
+        assert False, f"Expected /daily-backup.sh to be allowed, got: {e}"

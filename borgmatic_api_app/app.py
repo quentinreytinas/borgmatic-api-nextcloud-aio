@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flask import Flask
+from flask import Flask, Response
 
 from .auth import AuthManager
 from .buffers import BufferStore
@@ -30,6 +30,13 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["JSON_AS_ASCII"] = False
     app.config["SERVICES"] = services
+
+    @app.after_request
+    def _set_security_headers(response: Response) -> Response:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        return response
 
     app.register_blueprint(create_blueprint(services))
     return app

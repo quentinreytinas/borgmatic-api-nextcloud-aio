@@ -67,16 +67,16 @@ def validate_docker_exec(
     command_str = _command_to_str(command)
 
     if config.no_shell:
-        for shell in ("bash", "sh", "zsh", "fish", "ash"):
-            if shell in command:
+        for part in command:
+            if os.path.basename(part).lower() in ("bash", "sh", "zsh", "fish", "ash"):
                 raise PermissionError(
-                    f"Shell interdit pour '{container}'. Commande refusée : {shell}"
+                    f"Shell interdit pour '{container}'. Commande refusée : {part}"
                 )
 
     blocked = [
         dangerous
         for dangerous in settings.dangerous_commands
-        if any(dangerous == part.lower() for part in command)
+        if any(dangerous == os.path.basename(part).lower() for part in command)
     ]
     if blocked:
         forbidden = ", ".join(sorted(set(blocked)))
