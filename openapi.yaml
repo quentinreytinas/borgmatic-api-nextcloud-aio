@@ -237,6 +237,75 @@ paths:
         '400': { $ref: '#/components/responses/ErrorEnvelope' }
         '403': { $ref: '#/components/responses/ErrorEnvelope' }
         '408': { $ref: '#/components/responses/ErrorEnvelope' }
+        '502': { $ref: '#/components/responses/ErrorEnvelope' }
+        '503': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /nextcloud/backup-target:
+    get:
+      tags: [Nextcloud AIO]
+      summary: Lire la cible de sauvegarde AIO actuelle
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+    post:
+      tags: [Nextcloud AIO]
+      summary: Changer la cible de sauvegarde AIO
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host_location: { type: string }
+                remote_repo: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /nextcloud/daily-backup/run-for-target:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Lancer le backup officiel sur une cible temporaire
+      description: >-
+        Écrit d'abord la cible AIO (`host_location` ou `remote_repo`), exécute
+        `daily-backup.sh`, puis restaure la cible précédente quand `restore_after=true`.
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host_location: { type: string }
+                remote_repo: { type: string }
+                restore_after: { type: boolean, default: true }
+                daily_backup: { type: boolean, default: true }
+                check_backup: { type: boolean, default: false }
+                stop_containers: { type: boolean, default: true }
+                start_containers: { type: boolean, default: true }
+                automatic_updates: { type: boolean, default: false }
+                lock_file_present: { type: boolean }
+                backup_restore_password: { type: string }
+                extra_env: { type: object, additionalProperties: { type: string } }
+                with_stop: { type: boolean, default: false }
+                stop_timeout: { type: integer, default: 30 }
+                timeout: { type: integer, default: 3600 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
+        '403': { $ref: '#/components/responses/ErrorEnvelope' }
+        '404': { $ref: '#/components/responses/ErrorEnvelope' }
+        '408': { $ref: '#/components/responses/ErrorEnvelope' }
+        '502': { $ref: '#/components/responses/ErrorEnvelope' }
         '503': { $ref: '#/components/responses/ErrorEnvelope' }
 
   /nextcloud/official-daily-backup:

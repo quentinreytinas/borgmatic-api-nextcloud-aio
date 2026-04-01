@@ -141,6 +141,30 @@ curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run \
 ```
 
 La réponse contient `result.command`, `result.stdout/stderr`, et l'environnement injecté (`env`) pour audit.
+Si le script officiel retourne `0` mais que le conteneur `nextcloud-aio-borgbackup` échoue
+ensuite, l'API répond désormais en erreur avec `error=backup_failed` et inclut la fin des logs Borg.
+
+**2bis. Changer temporairement la cible puis lancer le backup officiel**
+
+```bash
+curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run-for-target \
+  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "X-From-NodeRed: NodeRED-Internal" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg",
+        "restore_after": true,
+        "daily_backup": true,
+        "check_backup": false,
+        "stop_containers": true,
+        "start_containers": true,
+        "automatic_updates": false
+      }'
+```
+
+Pour lire ou modifier la cible sans lancer la sauvegarde:
+- `GET /nextcloud/backup-target`
+- `POST /nextcloud/backup-target`
 
 **3. Vérifier la disponibilité réseau des conteneurs**
 

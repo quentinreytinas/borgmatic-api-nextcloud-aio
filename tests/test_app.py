@@ -1,4 +1,5 @@
 import pytest
+import json
 
 try:
     from borgmatic_api_app import create_app
@@ -10,11 +11,23 @@ if create_app is None:  # pragma: no cover - skip tests when Flask missing
 
 
 @pytest.fixture()
-def app(monkeypatch):
+def app(monkeypatch, tmp_path):
     monkeypatch.setenv("API_TOKEN", "test-write")
     monkeypatch.setenv("API_READ_TOKEN", "test-read")
     monkeypatch.setenv("APP_FROM_HEADER", "NodeRED-Internal")
     monkeypatch.delenv("APP_READY_WEBHOOK_URL", raising=False)
+    aio_config = tmp_path / "configuration.json"
+    aio_config.write_text(
+        json.dumps(
+            {
+                "borg_backup_host_location": "/mnt/backup/borgmatic_local",
+                "borg_remote_repo": "",
+                "wasStartButtonClicked": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AIO_CONFIG_FILE", str(aio_config))
     return create_app()
 
 
@@ -179,6 +192,115 @@ def test_daily_backup_run_translates_booleans(monkeypatch, app):
     assert any(entry.endswith("CUSTOM=value") for entry in args)
     assert captured["timeout"] == 3600
     assert "DOCKER_HOST" not in captured["env"]
+
+
+def test_daily_backup_run_returns_error_when_borgbackup_failed(monkeypatch, app):
+    client = app.test_client()
+
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._docker_exec_daily",
+        lambda **kwargs: {
+            "returncode": 0,
+            "stdout": "OK",
+            "stderr": "",
+            "command": "/daily-backup.sh",
+            "env": kwargs.get("env_vars", {}),
+        },
+    )
+    inspect_states = iter(
+        [
+            {
+                "StartedAt": "before",
+                "FinishedAt": "before",
+                "ExitCode": 0,
+                "Status": "exited",
+            },
+            {
+                "StartedAt": "after",
+                "FinishedAt": "after",
+                "ExitCode": 1,
+                "Status": "exited",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._docker_inspect_state",
+        lambda container: next(inspect_states),
+    )
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._docker_logs_tail",
+        lambda container, tail=40: "Permission denied (publickey)",
+    )
+
+    response = client.post(
+        "/nextcloud/daily-backup/run",
+        json={"daily_backup": True},
+        headers=auth_headers(write=True),
+    )
+
+    assert response.status_code == 502
+    payload = response.get_json()
+    assert payload["error"] == "backup_failed"
+    assert payload["borgbackup"]["failed"] is True
+    assert "Permission denied" in payload["borgbackup"]["log_tail"]
+
+
+def test_backup_target_routes_round_trip(monkeypatch, app):
+    client = app.test_client()
+
+    response = client.post(
+        "/nextcloud/backup-target",
+        json={
+            "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg"
+        },
+        headers=auth_headers(write=True),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["target"]["mode"] == "remote"
+    assert payload["previous"]["host_location"] == "/mnt/backup/borgmatic_local"
+
+    get_response = client.get("/nextcloud/backup-target", headers=auth_headers())
+    assert get_response.status_code == 200
+    get_payload = get_response.get_json()
+    assert get_payload["target"]["remote_repo"].startswith(
+        "ssh://sauvegarde_reytinas@192.168.1.10:22/"
+    )
+
+
+def test_run_for_target_restores_previous_target(monkeypatch, app):
+    client = app.test_client()
+
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._docker_exec_daily",
+        lambda **kwargs: {
+            "returncode": 0,
+            "stdout": "OK",
+            "stderr": "",
+            "command": "/daily-backup.sh",
+            "env": kwargs.get("env_vars", {}),
+        },
+    )
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._docker_inspect_state",
+        lambda container: None,
+    )
+
+    response = client.post(
+        "/nextcloud/daily-backup/run-for-target",
+        json={
+            "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg",
+            "restore_after": True,
+        },
+        headers=auth_headers(write=True),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["target"]["mode"] == "remote"
+    assert payload["restored"]["mode"] == "local"
+    assert payload["previous"]["host_location"] == "/mnt/backup/borgmatic_local"
 
 
 def test_daily_backup_uses_socket_proxy_when_configured(monkeypatch):

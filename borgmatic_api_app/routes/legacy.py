@@ -38,6 +38,7 @@ BORG_SSH_DIR = ""
 AIO_MASTER = ""
 AIO_DAILY = ""
 AIO_HEALTH = ""
+AIO_BORGBACKUP = "nextcloud-aio-borgbackup"
 REQUIRED_AIO_ARCHIVE_FORMAT = "{now:%Y%m%d_%H%M%S}-nextcloud-aio"
 USE_SOCKET_PROXY = False
 ALLOWED_EXEC_CONTAINERS: Dict[str, Dict[str, Any]] = {}
@@ -47,6 +48,7 @@ SSE_BASE_URL = ""
 READY_WEBHOOK_URL = ""
 READY_HOOKS: set[str] = set()
 START_TIME = time.time()
+_AIO_CONFIG_LOCK = threading.Lock()
 
 
 def _services() -> Services:
@@ -113,6 +115,70 @@ def _merge_env(extra: Dict[str, str]) -> Dict[str, str]:
     env = os.environ.copy()
     env.update(extra)
     return env
+
+
+def _aio_config_path() -> Path:
+    return _settings().aio_config_file
+
+
+def _read_aio_config() -> Dict[str, Any]:
+    path = _aio_config_path()
+    if not path.exists():
+        raise FileNotFoundError(f"AIO config file not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _validate_aio_backup_target(
+    host_location: Optional[str], remote_repo: Optional[str]
+) -> tuple[str, str]:
+    host_location = (host_location or "").strip()
+    remote_repo = (remote_repo or "").strip()
+
+    if not host_location and not remote_repo:
+        raise ValueError("host_location or remote_repo required")
+    if host_location and remote_repo:
+        raise ValueError("host_location and remote_repo are mutually exclusive")
+
+    if host_location:
+        if not host_location.startswith("/") or host_location.endswith("/"):
+            raise ValueError(
+                "host_location must start with '/' and must not end with '/'"
+            )
+    else:
+        if "@" not in remote_repo or ":" not in remote_repo:
+            raise ValueError("remote_repo must be a valid borg SSH repository URL")
+
+    return host_location, remote_repo
+
+
+def _set_aio_backup_target(
+    *, host_location: Optional[str], remote_repo: Optional[str]
+) -> Dict[str, Any]:
+    host_location, remote_repo = _validate_aio_backup_target(host_location, remote_repo)
+    path = _aio_config_path()
+
+    with _AIO_CONFIG_LOCK:
+        data = _read_aio_config()
+        previous = {
+            "host_location": data.get("borg_backup_host_location", ""),
+            "remote_repo": data.get("borg_remote_repo", ""),
+        }
+        data["borg_backup_host_location"] = host_location
+        data["borg_remote_repo"] = remote_repo
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=4) + "\n", encoding="utf-8"
+        )
+
+    return previous
+
+
+def _current_aio_backup_target() -> Dict[str, Any]:
+    data = _read_aio_config()
+    return {
+        "host_location": data.get("borg_backup_host_location", ""),
+        "remote_repo": data.get("borg_remote_repo", ""),
+        "mode": "remote" if data.get("borg_remote_repo", "") else "local",
+    }
 
 
 # =============================================================================
@@ -184,6 +250,47 @@ def _resolve_config(label: str) -> Path:
         if p.exists():
             return p
     raise FileNotFoundError(f"Config {label} not found")
+
+
+def _config_path_for_label(label: str) -> Path:
+    """
+    Retourne le chemin de config à utiliser pour un label donné.
+    Préserve l'extension existante si le fichier est déjà présent, sinon crée
+    par défaut un fichier `.yaml`.
+    """
+    try:
+        return _resolve_config(label)
+    except FileNotFoundError:
+        if not SAFE_LABEL_RE.match(label):
+            raise ValueError("Invalid label format")
+        return Path(BORG_CONFIG_DIR) / f"{label}.yaml"
+
+
+def _load_config_from_body(body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Charge une configuration YAML depuis `config` (objet JSON) ou `yaml`
+    (chaîne YAML). Lève ValueError si le payload est invalide.
+    """
+    has_config = body.get("config") is not None
+    has_yaml = bool(str(body.get("yaml") or "").strip())
+
+    if has_config == has_yaml:
+        raise ValueError("Provide exactly one of: config or yaml")
+
+    raw = body.get("config") if has_config else yaml.safe_load(body.get("yaml"))
+    if not isinstance(raw, dict):
+        raise ValueError("config must be a YAML/JSON object")
+    return raw
+
+
+def _dump_yaml_config(config: Dict[str, Any]) -> str:
+    return yaml.safe_dump(
+        config,
+        sort_keys=False,
+        allow_unicode=False,
+        default_flow_style=False,
+        indent=2,
+    )
 
 
 def _validate_ssh_label(label: str) -> None:
@@ -264,6 +371,7 @@ ALLOWED_SUB = {
     "check",
     "info",
     "repo-list",
+    "repo-create",
     "extract",
     "mount",
     "umount",
@@ -288,6 +396,15 @@ ALLOWED_FLAGS = {
     "--options",
     "--repair",
     "--successful",
+    "--repository",
+    "--encryption",
+    "-e",
+    "--source-repository",
+    "--other-repo",
+    "--copy-crypt-key",
+    "--append-only",
+    "--storage-quota",
+    "--make-parent-dirs",
 }
 
 
@@ -411,6 +528,92 @@ def _docker_exec_daily(
         command += list(args)
 
     return _docker_exec_master(command, env_vars=env_vars, timeout=timeout)
+
+
+def _docker_inspect_state(container: str) -> Optional[Dict[str, Any]]:
+    """Inspect a container state and return it as a dict when available."""
+
+    env = os.environ.copy()
+    settings = _settings()
+    if settings.use_socket_proxy and settings.docker_host:
+        env["DOCKER_HOST"] = settings.docker_host
+
+    process = subprocess.run(
+        ["docker", "inspect", container, "--format", "{{json .State}}"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+    )
+    if process.returncode != 0:
+        return None
+
+    try:
+        state = json.loads(process.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _docker_logs_tail(container: str, tail: int = 40) -> str:
+    """Return the tail of docker logs for a container."""
+
+    env = os.environ.copy()
+    settings = _settings()
+    if settings.use_socket_proxy and settings.docker_host:
+        env["DOCKER_HOST"] = settings.docker_host
+
+    process = subprocess.run(
+        ["docker", "logs", "--tail", str(tail), container],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=env,
+    )
+    return (process.stdout or process.stderr or "").strip()
+
+
+def _collect_aio_borgbackup_result(
+    before_state: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Inspect the AIO borgbackup container and flag fresh failures."""
+
+    after_state = _docker_inspect_state(AIO_BORGBACKUP)
+    if after_state is None:
+        return None
+
+    before_marker = (
+        before_state or {}
+    ).get("StartedAt"), (before_state or {}).get("FinishedAt"), (
+        before_state or {}
+    ).get(
+        "ExitCode"
+    ), (
+        before_state or {}
+    ).get(
+        "Status"
+    )
+    after_marker = (
+        after_state.get("StartedAt"),
+        after_state.get("FinishedAt"),
+        after_state.get("ExitCode"),
+        after_state.get("Status"),
+    )
+    changed = before_marker != after_marker
+    exit_code = int(after_state.get("ExitCode") or 0)
+    failed = changed and after_state.get("Status") == "exited" and exit_code != 0
+
+    result: Dict[str, Any] = {
+        "container": AIO_BORGBACKUP,
+        "changed": changed,
+        "before": before_state,
+        "after": after_state,
+        "failed": failed,
+    }
+    if failed:
+        result["message"] = f"{AIO_BORGBACKUP} exited with code {exit_code}"
+        result["log_tail"] = _docker_logs_tail(AIO_BORGBACKUP)
+    return result
 
 
 def _stop_official_daily_backup(timeout: Optional[int] = None) -> Dict[str, Any]:
@@ -821,6 +1024,13 @@ def aio_daily_backup_run():
         for key, value in extra_env.items():
             env_vars[str(key)] = str(value)
 
+        backup_requested = (
+            env_vars.get("DAILY_BACKUP") == "1" and env_vars.get("CHECK_BACKUP") != "1"
+        )
+        borgbackup_before = (
+            _docker_inspect_state(AIO_BORGBACKUP) if backup_requested else None
+        )
+
         pre_stop: Optional[Dict[str, Any]] = None
         if body.get("with_stop", False):
             try:
@@ -851,14 +1061,190 @@ def aio_daily_backup_run():
             details = _handle_docker_error("docker exec daily-backup", e)
             return _json_error(503, **details)
 
+        borgbackup = (
+            _collect_aio_borgbackup_result(borgbackup_before)
+            if backup_requested
+            else None
+        )
+
         payload = {"result": result}
         if pre_stop is not None:
             payload["pre_stop"] = pre_stop
         payload["env"] = env_vars
+        if borgbackup is not None:
+            payload["borgbackup"] = borgbackup
+            if borgbackup.get("failed"):
+                return _json_error(
+                    502,
+                    "backup_failed",
+                    borgbackup.get("message", "AIO borgbackup failed"),
+                    **payload,
+                )
         return _json_ok(payload)
     except ValueError as ve:
         return _json_error(400, "bad_request", str(ve))
     except Exception as e:
+        return _json_error(400, "exec_error", str(e))
+
+
+@bp.route("/nextcloud/backup-target")
+def aio_backup_target_get():
+    try:
+        _require_auth(read_only=True)
+        return _json_ok({"target": _current_aio_backup_target()})
+    except FileNotFoundError as e:
+        return _json_error(404, "not_found", str(e))
+    except Exception as e:
+        return _json_error(400, "read_error", str(e))
+
+
+@bp.route("/nextcloud/backup-target", methods=["POST"])
+@rate_limited(10, 60)
+def aio_backup_target_set():
+    try:
+        _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        previous = _set_aio_backup_target(
+            host_location=body.get("host_location"),
+            remote_repo=body.get("remote_repo"),
+        )
+        return _json_ok({"target": _current_aio_backup_target(), "previous": previous})
+    except FileNotFoundError as e:
+        return _json_error(404, "not_found", str(e))
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
+    except Exception as e:
+        return _json_error(400, "write_error", str(e))
+
+
+@bp.route("/nextcloud/daily-backup/run-for-target", methods=["POST"])
+@rate_limited(3, 300)
+def aio_daily_backup_run_for_target():
+    try:
+        _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        timeout = int(body.get("timeout", 3600))
+        restore_after = bool(body.get("restore_after", True))
+
+        previous = _set_aio_backup_target(
+            host_location=body.get("host_location"),
+            remote_repo=body.get("remote_repo"),
+        )
+        target = _current_aio_backup_target()
+
+        try:
+            backup_body = {
+                "daily_backup": body.get("daily_backup", True),
+                "check_backup": body.get("check_backup", False),
+                "stop_containers": body.get("stop_containers", True),
+                "start_containers": body.get("start_containers", True),
+                "automatic_updates": body.get("automatic_updates", False),
+                "with_stop": body.get("with_stop", False),
+                "stop_timeout": body.get("stop_timeout", 30),
+                "timeout": timeout,
+            }
+            if body.get("lock_file_present") is not None:
+                backup_body["lock_file_present"] = body.get("lock_file_present")
+            if body.get("backup_restore_password"):
+                backup_body["backup_restore_password"] = body.get(
+                    "backup_restore_password"
+                )
+            if body.get("extra_env") is not None:
+                backup_body["extra_env"] = body.get("extra_env")
+
+            timeout_value = int(backup_body.get("timeout", 3600))
+            stop_timeout = int(backup_body.get("stop_timeout", 30))
+
+            env_vars: Dict[str, str] = {}
+            env_vars["DAILY_BACKUP"] = _bool_env(
+                backup_body.get("daily_backup"), True
+            )
+            env_vars["CHECK_BACKUP"] = _bool_env(
+                backup_body.get("check_backup"), False
+            )
+            env_vars["STOP_CONTAINERS"] = _bool_env(
+                backup_body.get("stop_containers"), True
+            )
+            env_vars["START_CONTAINERS"] = _bool_env(
+                backup_body.get("start_containers"), True
+            )
+            env_vars["AUTOMATIC_UPDATES"] = _bool_env(
+                backup_body.get("automatic_updates"), False
+            )
+            if backup_body.get("lock_file_present") is not None:
+                env_vars["LOCK_FILE_PRESENT"] = _bool_env(
+                    backup_body.get("lock_file_present"), False
+                )
+            backup_password = backup_body.get("backup_restore_password")
+            if backup_password:
+                env_vars["BACKUP_RESTORE_PASSWORD"] = str(backup_password)
+
+            extra_env = backup_body.get("extra_env") or {}
+            if not isinstance(extra_env, dict):
+                return _json_error(400, "bad_request", "extra_env must be an object")
+            for key, value in extra_env.items():
+                env_vars[str(key)] = str(value)
+
+            backup_requested = (
+                env_vars.get("DAILY_BACKUP") == "1"
+                and env_vars.get("CHECK_BACKUP") != "1"
+            )
+            borgbackup_before = (
+                _docker_inspect_state(AIO_BORGBACKUP) if backup_requested else None
+            )
+
+            pre_stop: Optional[Dict[str, Any]] = None
+            if backup_body.get("with_stop", False):
+                pre_stop = _docker_exec_daily(args=["stop"], timeout=stop_timeout)
+
+            result = _docker_exec_daily(env_vars=env_vars, timeout=timeout_value)
+            borgbackup = (
+                _collect_aio_borgbackup_result(borgbackup_before)
+                if backup_requested
+                else None
+            )
+        finally:
+            restored = None
+            if restore_after:
+                try:
+                    _set_aio_backup_target(
+                        host_location=previous.get("host_location"),
+                        remote_repo=previous.get("remote_repo"),
+                    )
+                    restored = _current_aio_backup_target()
+                except Exception as restore_error:
+                    restored = {"error": str(restore_error)}
+
+        payload: Dict[str, Any] = {"result": result, "target": target}
+        if pre_stop is not None:
+            payload["pre_stop"] = pre_stop
+        payload["previous"] = previous
+        payload["restored"] = restored
+        payload["env"] = env_vars
+        if borgbackup is not None:
+            payload["borgbackup"] = borgbackup
+            if borgbackup.get("failed"):
+                return _json_error(
+                    502,
+                    "backup_failed",
+                    borgbackup.get("message", "AIO borgbackup failed"),
+                    **payload,
+                )
+        return _json_ok(payload)
+    except FileNotFoundError as e:
+        return _json_error(404, "not_found", str(e))
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
+    except PermissionError as pe:
+        return _json_error(403, "exec_forbidden", str(pe))
+    except subprocess.TimeoutExpired as te:
+        return _json_error(
+            408, "timeout", f"daily-backup.sh timeout after {te.timeout}s"
+        )
+    except Exception as e:
+        details = _handle_docker_error("docker exec daily-backup", e)
+        if isinstance(details, dict) and "message" in details and "error" in details:
+            return _json_error(503, **details)
         return _json_error(400, "exec_error", str(e))
 
 
@@ -1094,6 +1480,98 @@ def config_get(label: str):
         return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "read_error", str(e))
+
+
+@bp.route("/configs/<label>", methods=["PUT"])
+@rate_limited(10, 300)
+def config_put(label: str):
+    try:
+        _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        overwrite = bool(body.get("overwrite", True))
+        validate = bool(body.get("validate", True))
+        process_timeout = _parse_timeout(body, default=60)
+
+        path = _config_path_for_label(label)
+        created = not path.exists()
+        if not created and not overwrite:
+            return _json_error(
+                409, "already_exists", f"Config {label} already exists: {path.name}"
+            )
+
+        config = _load_config_from_body(body)
+        rendered = _dump_yaml_config(config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{int(time.time())}")
+        tmp_path.write_text(rendered, encoding="utf-8")
+
+        try:
+            validation: Optional[Dict[str, Any]] = None
+            if validate:
+                args = ["borgmatic", "--config", str(tmp_path), "config", "validate"]
+                _validate_borgmatic_args(args)
+                process = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=process_timeout,
+                )
+                validation = {
+                    "returncode": process.returncode,
+                    "stdout": process.stdout,
+                    "stderr": process.stderr,
+                }
+                if process.returncode != 0:
+                    return _json_error(
+                        400,
+                        "validate_error",
+                        "config validation failed",
+                        path=str(path),
+                        created=created,
+                        validation=validation,
+                    )
+
+            path.write_text(rendered, encoding="utf-8")
+            return _json_ok(
+                {
+                    "label": label,
+                    "path": str(path),
+                    "created": created,
+                    "validated": validate,
+                    "validation": validation,
+                    "config": config,
+                }
+            )
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                tmp_path.unlink()
+    except subprocess.TimeoutExpired as te:
+        return _json_error(
+            408, "timeout", f"config write validation timed out after {te.timeout}s"
+        )
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
+    except PermissionError as pe:
+        return _json_error(401, "unauthorized", str(pe))
+    except Exception as e:
+        return _json_error(400, "write_error", str(e))
+
+
+@bp.route("/configs/<label>", methods=["DELETE"])
+@rate_limited(5, 300)
+def config_delete(label: str):
+    try:
+        _require_auth(read_only=False)
+        try:
+            path = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
+        path.unlink()
+        return _json_ok({"label": label, "deleted": True, "path": str(path)})
+    except PermissionError as pe:
+        return _json_error(401, "unauthorized", str(pe))
+    except Exception as e:
+        return _json_error(400, "delete_error", str(e))
 
 
 @bp.route("/config/validate-all")
@@ -1445,6 +1923,79 @@ def repo_passphrase_change(label: str):
         )
     except ValueError as ve:
         return _json_error(400, "invalid_secrets", str(ve))
+    except Exception as e:
+        return _json_error(400, "exec_error", str(e))
+
+
+@bp.route("/repositories/<label>/create", methods=["POST"])
+@rate_limited(3, 300)
+def repo_create(label: str):
+    """borgmatic repo-create"""
+    try:
+        _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        process_timeout = _parse_timeout(body, default=300)
+        encryption = str(body.get("encryption") or "repokey-blake2").strip()
+        repository = str(body.get("repository") or "").strip()
+        source_repository = str(body.get("source_repository") or "").strip()
+        storage_quota = str(body.get("storage_quota") or "").strip()
+        borg_passphrase = body.get("borg_passphrase")
+        ssh_passphrase = body.get("ssh_passphrase")
+        _enforce_distinct_pass(borg_passphrase, ssh_passphrase)
+
+        try:
+            cfg = _resolve_config(label)
+        except FileNotFoundError as e:
+            return _json_error(404, "not_found", str(e))
+
+        args = [
+            "borgmatic",
+            "--config",
+            str(cfg),
+            "repo-create",
+            "--encryption",
+            encryption,
+        ]
+        if repository:
+            args.extend(["--repository", repository])
+        if source_repository:
+            args.extend(["--source-repository", source_repository])
+        if body.get("copy_crypt_key"):
+            args.append("--copy-crypt-key")
+        if body.get("append_only"):
+            args.append("--append-only")
+        if storage_quota:
+            args.extend(["--storage-quota", storage_quota])
+        if body.get("make_parent_dirs"):
+            args.append("--make-parent-dirs")
+
+        _validate_borgmatic_args(args)
+        env = {}
+        if borg_passphrase:
+            env["BORG_PASSPHRASE"] = borg_passphrase
+        if ssh_passphrase:
+            env["SSH_ASKPASS"] = "echo"
+            env["SSH_PASSPHRASE"] = ssh_passphrase
+
+        process = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            env=_merge_env(env),
+            timeout=process_timeout,
+        )
+        return _json_ok(
+            {
+                "returncode": process.returncode,
+                "stdout": process.stdout,
+                "stderr": process.stderr,
+                "command": args,
+            }
+        )
+    except subprocess.TimeoutExpired as te:
+        return _json_error(408, "timeout", f"repo-create timed out after {te.timeout}s")
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
     except Exception as e:
         return _json_error(400, "exec_error", str(e))
 

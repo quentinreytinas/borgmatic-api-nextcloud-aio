@@ -27,6 +27,7 @@ class Settings:
     aio_master: str
     aio_daily: str
     aio_health: str
+    aio_config_file: Path
     required_aio_archive_format: str
     docker_host: str
     exec_whitelist: Dict[str, ExecWhitelistEntry]
@@ -107,6 +108,11 @@ def load_settings() -> Settings:
         aio_master=os.environ.get("AIO_MASTER", "nextcloud-aio-mastercontainer"),
         aio_daily=os.environ.get("AIO_DAILY", "/daily-backup.sh"),
         aio_health=os.environ.get("AIO_HEALTH", "/healthcheck.sh"),
+        aio_config_file=Path(
+            os.environ.get(
+                "AIO_CONFIG_FILE", "/nextcloud_aio_mastercontainer/data/configuration.json"
+            )
+        ).resolve(),
         required_aio_archive_format="{now:%Y%m%d_%H%M%S}-nextcloud-aio",
         docker_host=os.environ.get("DOCKER_HOST", ""),
         exec_whitelist=_load_exec_whitelist(),
