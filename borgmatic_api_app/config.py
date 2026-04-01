@@ -110,7 +110,8 @@ def load_settings() -> Settings:
         aio_health=os.environ.get("AIO_HEALTH", "/healthcheck.sh"),
         aio_config_file=Path(
             os.environ.get(
-                "AIO_CONFIG_FILE", "/nextcloud_aio_mastercontainer/data/configuration.json"
+                "AIO_CONFIG_FILE",
+                "/nextcloud_aio_mastercontainer/data/configuration.json",
             )
         ).resolve(),
         required_aio_archive_format="{now:%Y%m%d_%H%M%S}-nextcloud-aio",

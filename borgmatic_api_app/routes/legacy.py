@@ -583,15 +583,10 @@ def _collect_aio_borgbackup_result(
         return None
 
     before_marker = (
-        before_state or {}
-    ).get("StartedAt"), (before_state or {}).get("FinishedAt"), (
-        before_state or {}
-    ).get(
-        "ExitCode"
-    ), (
-        before_state or {}
-    ).get(
-        "Status"
+        (before_state or {}).get("StartedAt"),
+        (before_state or {}).get("FinishedAt"),
+        (before_state or {}).get("ExitCode"),
+        (before_state or {}).get("Status"),
     )
     after_marker = (
         after_state.get("StartedAt"),
@@ -1156,12 +1151,8 @@ def aio_daily_backup_run_for_target():
             stop_timeout = int(backup_body.get("stop_timeout", 30))
 
             env_vars: Dict[str, str] = {}
-            env_vars["DAILY_BACKUP"] = _bool_env(
-                backup_body.get("daily_backup"), True
-            )
-            env_vars["CHECK_BACKUP"] = _bool_env(
-                backup_body.get("check_backup"), False
-            )
+            env_vars["DAILY_BACKUP"] = _bool_env(backup_body.get("daily_backup"), True)
+            env_vars["CHECK_BACKUP"] = _bool_env(backup_body.get("check_backup"), False)
             env_vars["STOP_CONTAINERS"] = _bool_env(
                 backup_body.get("stop_containers"), True
             )
