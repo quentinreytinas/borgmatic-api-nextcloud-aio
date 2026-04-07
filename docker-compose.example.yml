@@ -89,7 +89,7 @@ services:
       
       # Token de lecture pour opérations read-only (status, info, logs)
       # Si non défini, utilise BORG_API_TOKEN
-      API_READ_TOKEN: "${BORG_API_READ_TOKEN:?ERREUR: BORG_API_READ_TOKEN requis dans .env}"
+      API_READ_TOKEN: "${BORG_API_READ_TOKEN:-${BORG_API_TOKEN:?ERREUR: BORG_API_TOKEN requis dans .env}}"
       
       # Header personnalisé pour identification du client (Node-RED)
       APP_FROM_HEADER: "${APP_FROM_HEADER:?ERREUR: APP_FROM_HEADER requis dans .env}"
@@ -181,7 +181,7 @@ services:
       - "com.centurylinklabs.watchtower.stop-timeout=300s"
 
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health/public', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -194,7 +194,6 @@ volumes:
   nextcloud_aio_nextcloud:
     external: true
   nextcloud_aio_nextcloud_data:
-    external: true
     external: true
   nextcloud_aio_database:
     external: true

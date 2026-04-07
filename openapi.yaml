@@ -5,7 +5,7 @@ info:
   description: |
     API REST pilotable par Node-RED pour orchestrer Borgmatic autour de Nextcloud AIO.
     - Auth bidirectionnelle via en-tête `X-From-NodeRed` et Bearer token.
-    - **Read endpoints** acceptent Bearer READ_TOKEN (ou `X-Progress-Token` == READ_TOKEN).
+    - **Read endpoints** acceptent Bearer READ_TOKEN **ou** WRITE_TOKEN, et aussi `X-Progress-Token: READ_TOKEN`.
     - **Write endpoints** exigent Bearer WRITE_TOKEN.
     - Liste blanche stricte des sous-commandes borgmatic.
 servers:
@@ -25,6 +25,7 @@ tags:
   - name: SSH Keys
   - name: Network
   - name: Jobs
+  - name: Security
 
 paths:
   /:
@@ -47,6 +48,24 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/OkEnvelope' }
         '500': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /health/public:
+    get:
+      tags: [System]
+      summary: Healthcheck public sans authentification (liveness)
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '500': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /metrics:
+    get:
+      tags: [System]
+      summary: Métriques JSON (uptime, compteurs HTTP, rate-limit)
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
 
   /status:
     get:
@@ -628,6 +647,28 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/OkEnvelope' }
 
+  /repositories/{label}/create:
+    post:
+      tags: [Repositories]
+      summary: Créer une archive pour un repository donné
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+        - $ref: '#/components/parameters/Label'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                borg_passphrase: { type: string }
+                ssh_passphrase: { type: string }
+                stats: { type: boolean, default: true }
+                progress: { type: boolean, default: true }
+                verbosity: { type: string, default: "1" }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
   /create-backup:
     post:
       tags: [Archives]
@@ -962,6 +1003,52 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/OkEnvelope' }
 
+  /security/exec-whitelist:
+    get:
+      tags: [Security]
+      summary: Retourne la whitelist docker exec active
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
+  /security/exec-whitelist/validate:
+    post:
+      tags: [Security]
+      summary: Valider une requête docker exec contre la whitelist
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [container, command]
+              properties:
+                container: { type: string }
+                command:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
+
+  /security/audit-log:
+    get:
+      tags: [Security]
+      summary: Derniers événements de sécurité en mémoire
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthRead'
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+
   /net/tcp-check:
     get:
       tags: [Network]
@@ -1016,7 +1103,8 @@ components:
       required: false
       schema: { type: string, example: "Bearer READ_TOKEN" }
       description: |
-        Auth de lecture. Alternativement, l’en-tête `X-Progress-Token: READ_TOKEN` est accepté.
+        Auth de lecture. Ce header accepte `Bearer READ_TOKEN` ou `Bearer WRITE_TOKEN`.
+        Alternativement, `X-Progress-Token: READ_TOKEN` est aussi accepté.
     AuthWrite:
       in: header
       name: Authorization
