@@ -39,7 +39,7 @@ VOLUME ["/etc/borgmatic.d", "/root/.ssh", "/var/lib/borg"]
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=3)"
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health/public', timeout=3)"
 
 EXPOSE 5000
 ENTRYPOINT ["/entrypoint.sh"]

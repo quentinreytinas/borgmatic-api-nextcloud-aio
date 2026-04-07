@@ -49,10 +49,6 @@ class Settings:
             raise RuntimeError(
                 "API_TOKEN must be set and non empty to start the Borgmatic API"
             )
-        if not self.read_token:
-            raise RuntimeError(
-                "API_READ_TOKEN must be set and non empty to start the Borgmatic API"
-            )
 
 
 DEFAULT_WHITELIST = {

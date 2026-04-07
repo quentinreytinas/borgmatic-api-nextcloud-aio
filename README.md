@@ -42,7 +42,7 @@ cp docker-compose.example.yml docker-compose.yml
 openssl rand -hex 32
 ```
 
-> ℹ️ **Obligatoire** : `API_TOKEN` et `API_READ_TOKEN` doivent être définis (valeurs non vides). L'API refuse de démarrer si l'un des deux est manquant.
+> ℹ️ **Obligatoire** : `API_TOKEN` doit être défini (valeur non vide). `API_READ_TOKEN` est optionnel et, s'il est absent, l'API utilise `API_TOKEN` comme fallback.
 
 ### Éditer docker-compose.yml et remplacer:
 ### - API_TOKEN=CHANGEME_... par votre token
@@ -61,7 +61,7 @@ docker compose up -d
 ```bash
 curl -H "Authorization: Bearer VOTRE_TOKEN" \
      -H "X-From-NodeRed: NodeRED-Internal" \
-     http://localhost:5000/health
+     http://localhost:5000/health/public
 ```
 
 Exemple : Créer un backup
