@@ -50,6 +50,7 @@ class Settings:
                 "API_TOKEN must be set and non empty to start the Borgmatic API"
             )
 
+
 DEFAULT_WHITELIST = {
     "nextcloud-aio-mastercontainer": ExecWhitelistEntry(
         commands=["/daily-backup.sh", "/healthcheck.sh"],
