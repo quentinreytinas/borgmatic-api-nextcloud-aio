@@ -327,6 +327,41 @@ paths:
         '502': { $ref: '#/components/responses/ErrorEnvelope' }
         '503': { $ref: '#/components/responses/ErrorEnvelope' }
 
+  /nextcloud/daily-backup/run-for-target/async:
+    post:
+      tags: [Nextcloud AIO]
+      summary: Lancer le backup officiel sur une cible temporaire en arrière-plan
+      description: >-
+        Variante asynchrone de `run-for-target`. L'API renvoie immédiatement un
+        `job_id` et le client peut ensuite suivre le job via `/events/poll/{job_id}`
+        ou `/events/stream`.
+      parameters:
+        - $ref: '#/components/parameters/XFrom'
+        - $ref: '#/components/parameters/AuthWrite'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host_location: { type: string }
+                remote_repo: { type: string }
+                restore_after: { type: boolean, default: true }
+                daily_backup: { type: boolean, default: true }
+                check_backup: { type: boolean, default: false }
+                stop_containers: { type: boolean, default: true }
+                start_containers: { type: boolean, default: true }
+                automatic_updates: { type: boolean, default: false }
+                lock_file_present: { type: boolean }
+                backup_restore_password: { type: string }
+                extra_env: { type: object, additionalProperties: { type: string } }
+                with_stop: { type: boolean, default: false }
+                stop_timeout: { type: integer, default: 30 }
+                timeout: { type: integer, default: 3600 }
+      responses:
+        '200': { $ref: '#/components/responses/OkEnvelope' }
+        '400': { $ref: '#/components/responses/ErrorEnvelope' }
+
   /nextcloud/official-daily-backup:
     post:
       tags: [Nextcloud AIO]

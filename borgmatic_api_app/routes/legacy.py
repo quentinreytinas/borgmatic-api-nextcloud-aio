@@ -463,6 +463,118 @@ def _run_borgmatic(args: List[str], env: Dict[str, str], job_id: str):
     return proc
 
 
+def _push_job_status(job_id: str, event: str, **extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "event": event,
+        "job_id": job_id,
+        "timestamp": time.time(),
+    }
+    payload.update(extra)
+    _buf_get(job_id).push("status", json.dumps(payload, ensure_ascii=False))
+    return payload
+
+
+def _docker_exec_master_stream(
+    container: str,
+    command: List[str],
+    *,
+    env_vars: Optional[Dict[str, str]] = None,
+    timeout: int = 3600,
+    job_id: str,
+) -> Dict[str, Any]:
+    """Run a docker exec command and stream stdout/stderr into the job buffer."""
+
+    _validate_docker_exec(container, command)
+
+    exec_args = ["docker", "exec"]
+    for key, value in sorted((env_vars or {}).items()):
+        exec_args += ["--env", f"{key}={value}"]
+    exec_args += [container, *command]
+
+    env = os.environ.copy()
+    settings = _settings()
+    if settings.use_socket_proxy and settings.docker_host:
+        env["DOCKER_HOST"] = settings.docker_host
+
+    proc = subprocess.Popen(
+        exec_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+        env=env,
+    )
+    buf = _buf_get(job_id)
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+
+    def reader(stream, kind: str, lines: List[str]):
+        for line in iter(stream.readline, ""):
+            text = line.rstrip("\n")
+            lines.append(text)
+            buf.push(kind, text)
+        with contextlib.suppress(Exception):
+            stream.close()
+
+    stdout_thread = threading.Thread(
+        target=reader, args=(proc.stdout, "stdout", stdout_lines), daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=reader, args=(proc.stderr, "stderr", stderr_lines), daemon=True
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+        raise
+
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+    return {
+        "returncode": returncode,
+        "stdout": "\n".join(stdout_lines),
+        "stderr": "\n".join(stderr_lines),
+        "command": " ".join(command),
+        "env": env_vars or {},
+    }
+
+
+def _docker_exec_daily_stream(
+    *,
+    args: Optional[List[str]] = None,
+    env_vars: Optional[Dict[str, str]] = None,
+    timeout: int = 3600,
+    job_id: str,
+) -> Dict[str, Any]:
+    """Run `/daily-backup.sh` inside the Nextcloud AIO master container with streamed logs."""
+
+    if not AIO_DAILY:
+        return {
+            "skipped": True,
+            "reason": "AIO daily backup script not configured",
+        }
+
+    command = [AIO_DAILY]
+    if args:
+        command += list(args)
+
+    return _docker_exec_master_stream(
+        AIO_MASTER,
+        command,
+        env_vars=env_vars,
+        timeout=timeout,
+        job_id=job_id,
+    )
+
+
 # =============================================================================
 # NEXTCLOUD AIO HELPERS
 # =============================================================================
@@ -1236,6 +1348,213 @@ def aio_daily_backup_run_for_target():
         details = _handle_docker_error("docker exec daily-backup", e)
         if isinstance(details, dict) and "message" in details and "error" in details:
             return _json_error(503, **details)
+        return _json_error(400, "exec_error", str(e))
+
+
+def _aio_daily_backup_run_for_target_job(job_id: str, body: Dict[str, Any]) -> None:
+    _push_job_status(job_id, "queued")
+    previous: Optional[Dict[str, Any]] = None
+    target: Optional[Dict[str, Any]] = None
+    restored: Optional[Dict[str, Any]] = None
+
+    try:
+        timeout = int(body.get("timeout", 3600))
+        restore_after = bool(body.get("restore_after", True))
+
+        previous = _set_aio_backup_target(
+            host_location=body.get("host_location"),
+            remote_repo=body.get("remote_repo"),
+        )
+        target = _current_aio_backup_target()
+
+        backup_body = {
+            "daily_backup": body.get("daily_backup", True),
+            "check_backup": body.get("check_backup", False),
+            "stop_containers": body.get("stop_containers", True),
+            "start_containers": body.get("start_containers", True),
+            "automatic_updates": body.get("automatic_updates", False),
+            "with_stop": body.get("with_stop", False),
+            "stop_timeout": body.get("stop_timeout", 30),
+            "timeout": timeout,
+        }
+        if body.get("lock_file_present") is not None:
+            backup_body["lock_file_present"] = body.get("lock_file_present")
+        if body.get("backup_restore_password"):
+            backup_body["backup_restore_password"] = body.get("backup_restore_password")
+        if body.get("extra_env") is not None:
+            backup_body["extra_env"] = body.get("extra_env")
+
+        timeout_value = int(backup_body.get("timeout", 3600))
+        stop_timeout = int(backup_body.get("stop_timeout", 30))
+
+        env_vars: Dict[str, str] = {}
+        env_vars["DAILY_BACKUP"] = _bool_env(backup_body.get("daily_backup"), True)
+        env_vars["CHECK_BACKUP"] = _bool_env(backup_body.get("check_backup"), False)
+        env_vars["STOP_CONTAINERS"] = _bool_env(
+            backup_body.get("stop_containers"), True
+        )
+        env_vars["START_CONTAINERS"] = _bool_env(
+            backup_body.get("start_containers"), True
+        )
+        env_vars["AUTOMATIC_UPDATES"] = _bool_env(
+            backup_body.get("automatic_updates"), False
+        )
+        if backup_body.get("lock_file_present") is not None:
+            env_vars["LOCK_FILE_PRESENT"] = _bool_env(
+                backup_body.get("lock_file_present"), False
+            )
+        backup_password = backup_body.get("backup_restore_password")
+        if backup_password:
+            env_vars["BACKUP_RESTORE_PASSWORD"] = str(backup_password)
+
+        extra_env = backup_body.get("extra_env") or {}
+        if not isinstance(extra_env, dict):
+            raise ValueError("extra_env must be an object")
+        for key, value in extra_env.items():
+            env_vars[str(key)] = str(value)
+
+        backup_requested = (
+            env_vars.get("DAILY_BACKUP") == "1" and env_vars.get("CHECK_BACKUP") != "1"
+        )
+        borgbackup_before = (
+            _docker_inspect_state(AIO_BORGBACKUP) if backup_requested else None
+        )
+
+        pre_stop: Optional[Dict[str, Any]] = None
+        if backup_body.get("with_stop", False):
+            pre_stop = _docker_exec_daily(args=["stop"], timeout=stop_timeout)
+
+        _push_job_status(
+            job_id, "start", target=target, previous=previous, env=env_vars
+        )
+        result = _docker_exec_daily_stream(
+            env_vars=env_vars, timeout=timeout_value, job_id=job_id
+        )
+        borgbackup = (
+            _collect_aio_borgbackup_result(borgbackup_before)
+            if backup_requested
+            else None
+        )
+
+        if restore_after:
+            try:
+                _set_aio_backup_target(
+                    host_location=(previous or {}).get("host_location"),
+                    remote_repo=(previous or {}).get("remote_repo"),
+                )
+                restored = _current_aio_backup_target()
+            except Exception as restore_error:
+                restored = {"error": str(restore_error)}
+
+        status_payload: Dict[str, Any] = {
+            "target": target,
+            "previous": previous,
+            "restored": restored,
+            "result": result,
+            "env": env_vars,
+        }
+        if pre_stop is not None:
+            status_payload["pre_stop"] = pre_stop
+        if borgbackup is not None:
+            status_payload["borgbackup"] = borgbackup
+            if borgbackup.get("failed"):
+                log_tail = str(borgbackup.get("log_tail") or "").strip()
+                for line in log_tail.splitlines():
+                    _buf_get(job_id).push("stderr", line)
+                _push_job_status(
+                    job_id,
+                    "fail",
+                    message=borgbackup.get("message", "AIO borgbackup failed"),
+                    **status_payload,
+                )
+                return
+
+        if int(result.get("returncode") or 0) != 0:
+            _push_job_status(
+                job_id,
+                "fail",
+                message="daily-backup.sh returned a non-zero exit code",
+                **status_payload,
+            )
+            return
+
+        _push_job_status(job_id, "success", **status_payload)
+    except subprocess.TimeoutExpired as te:
+        if previous is not None and bool(body.get("restore_after", True)):
+            try:
+                _set_aio_backup_target(
+                    host_location=previous.get("host_location"),
+                    remote_repo=previous.get("remote_repo"),
+                )
+                restored = _current_aio_backup_target()
+            except Exception as restore_error:
+                restored = {"error": str(restore_error)}
+        _push_job_status(
+            job_id,
+            "fail",
+            message=f"daily-backup.sh timeout after {te.timeout}s",
+            timeout=te.timeout,
+            target=target,
+            previous=previous,
+            restored=restored,
+        )
+    except Exception as exc:
+        if previous is not None and bool(body.get("restore_after", True)):
+            try:
+                _set_aio_backup_target(
+                    host_location=previous.get("host_location"),
+                    remote_repo=previous.get("remote_repo"),
+                )
+                restored = _current_aio_backup_target()
+            except Exception as restore_error:
+                restored = {"error": str(restore_error)}
+        _push_job_status(
+            job_id,
+            "fail",
+            message=str(exc),
+            target=target,
+            previous=previous,
+            restored=restored,
+        )
+
+
+@bp.route("/nextcloud/daily-backup/run-for-target/async", methods=["POST"])
+@rate_limited(3, 300)
+def aio_daily_backup_run_for_target_async():
+    try:
+        _require_auth(read_only=False)
+        body = request.get_json(force=True, silent=True) or {}
+        _validate_aio_backup_target(
+            body.get("host_location"),
+            body.get("remote_repo"),
+        )
+        int(body.get("timeout", 3600))
+        int(body.get("stop_timeout", 30))
+        extra_env = body.get("extra_env")
+        if extra_env is not None and not isinstance(extra_env, dict):
+            raise ValueError("extra_env must be an object")
+        job_id = f"aio-run-for-target:{int(time.time())}"
+
+        worker = threading.Thread(
+            target=_aio_daily_backup_run_for_target_job,
+            args=(job_id, body),
+            daemon=True,
+        )
+        worker.start()
+
+        sse_base = SSE_BASE_URL or request.host_url.rstrip("/")
+        return _json_ok(
+            {
+                "job_id": job_id,
+                "sse": f"{sse_base}/events/stream?kinds=stdout,stderr,status&job_id={job_id}",
+                "poll": f"{sse_base}/events/poll/{job_id}",
+            }
+        )
+    except PermissionError as pe:
+        return _json_error(403, "exec_forbidden", str(pe))
+    except ValueError as ve:
+        return _json_error(400, "bad_request", str(ve))
+    except Exception as e:
         return _json_error(400, "exec_error", str(e))
 
 

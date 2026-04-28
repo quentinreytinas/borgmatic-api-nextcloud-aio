@@ -1,5 +1,6 @@
 import pytest
 import json
+import time
 
 try:
     from borgmatic_api_app import create_app
@@ -301,6 +302,58 @@ def test_run_for_target_restores_previous_target(monkeypatch, app):
     assert payload["target"]["mode"] == "remote"
     assert payload["restored"]["mode"] == "local"
     assert payload["previous"]["host_location"] == "/mnt/backup/borgmatic_local"
+
+
+def test_run_for_target_async_returns_job_and_events(monkeypatch, app):
+    client = app.test_client()
+
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._docker_exec_daily_stream",
+        lambda **kwargs: {
+            "returncode": 0,
+            "stdout": "Performing backup...",
+            "stderr": "",
+            "command": "/daily-backup.sh",
+            "env": kwargs.get("env_vars", {}),
+        },
+    )
+    monkeypatch.setattr(
+        "borgmatic_api_app.routes.legacy._docker_inspect_state",
+        lambda container: None,
+    )
+
+    response = client.post(
+        "/nextcloud/daily-backup/run-for-target/async",
+        json={
+            "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg",
+            "restore_after": True,
+        },
+        headers=auth_headers(write=True),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["job_id"].startswith("aio-run-for-target:")
+    assert payload["poll"].endswith(payload["job_id"])
+    assert "events/stream" in payload["sse"]
+
+    deadline = time.time() + 2
+    items = []
+    while time.time() < deadline:
+        poll_response = client.get(
+            f"/events/poll/{payload['job_id']}",
+            headers=auth_headers(),
+        )
+        assert poll_response.status_code == 200
+        items = poll_response.get_json()["items"]
+        if any('"event": "success"' in item.get("line", "") for item in items):
+            break
+        time.sleep(0.05)
+
+    status_lines = [item["line"] for item in items if item.get("kind") == "status"]
+    assert any('"event": "queued"' in line for line in status_lines)
+    assert any('"event": "start"' in line for line in status_lines)
+    assert any('"event": "success"' in line for line in status_lines)
 
 
 def test_daily_backup_uses_socket_proxy_when_configured(monkeypatch):
