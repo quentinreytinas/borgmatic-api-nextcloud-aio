@@ -1,7 +1,8 @@
 # Borgmatic API for Nextcloud AIO
 
-🚀 **API REST pour piloter Borgmatic depuis Node-RED** avec support complet de Nextcloud AIO.
+🚀 **API REST pour piloter Borgmatic** avec support complet de Nextcloud AIO, mode policy-based sécurisé, et intégration Node-RED.
 
+---
 
 ## 🎯 Fonctionnalités
 
@@ -9,11 +10,73 @@
 - ✅ **Intégration Nextcloud AIO** : Workflow complet (stop, backup, updates, healthcheck)
 - ✅ **Compatibilité backup officiel** : Arrêt automatique de `daily-backup.sh` avant `borgmatic`
 - ✅ **SSE (Server-Sent Events)** : Suivi temps réel des backups
-- ✅ **Authentification bidirectionnelle** : Token + header custom
 - ✅ **Rate limiting** : Protection contre abus
 - ✅ **Docker-ready** : Mises à jour automatiques via Watchtower
 - ✅ **SSH key management** : Création, rotation, test des clés
 - ✅ **Emergency mode** : Arrêt d'urgence et gestion des locks
+- ✅ **Multi-architecture** : Images `linux/amd64` + `linux/arm64/v8`
+
+### 🔒 Sécurité avancée (nouveau)
+
+- ✅ **Tokens 3 rôles** : ADMIN / ACTION / READ — séparation des privilèges
+- ✅ **Policy-based actions** : Actions prédéfinies en YAML, Node-RED ne peut que déclencher
+- ✅ **Flags sécurité** : 5 `ENABLE_*` pour isoler les endpoints sensibles
+- ✅ **Audit logging** : JSON structuré (stdout + fichier) pour chaque action
+
+---
+
+## 🔒 Security Hardening
+
+Par défaut, l'API fonctionne en **legacy mode** (comportement existant). Activez le mode sécurisé pour isoler Node-RED et réduire la surface d'attaque.
+
+### Tokens 3 rôles
+
+| Token | Rôle | Accès |
+|-------|------|-------|
+| `API_ADMIN_TOKEN` | Admin | Accès complet (config, locks, passphrase, actions) |
+| `API_ACTION_TOKEN` | Action | Actions prédéfinies uniquement (pour Node-RED) |
+| `API_READ_TOKEN` | Read | Statut, health, polling jobs, logs |
+
+Activer le mode sécurisé :
+
+```env
+SECURE_MODE=true
+API_ADMIN_TOKEN=<token admin>
+API_ACTION_TOKEN=<token action pour Node-RED>
+API_READ_TOKEN=<token lecture>
+```
+
+En mode sécurisé (`SECURE_MODE=true`), les 3 tokens sont obligatoires. En legacy mode (`SECURE_MODE=false` ou absent), `API_TOKEN` fonctionne comme avant.
+
+### Flags de sécurité
+
+5 drapeaux pour contrôler finement les endpoints sensibles :
+
+```env
+ENABLE_ADMIN_ENDPOINTS=true    # /emergency/shutdown
+ENABLE_CONFIG_WRITE=true       # /configs/* PUT/DELETE, /nextcloud/backup-target POST
+ENABLE_BREAK_LOCK=true         # /borgmatic-locks/break/*
+ENABLE_PASSPHRASE_CHANGE=true  # /repositories/*/passphrase/change
+ENABLE_ARBITRARY_TARGETS=true  # /nextcloud/daily-backup/run-for-target*
+```
+
+Désactivez les flags inutiles pour réduire la surface d'attaque, même avec un token ADMIN.
+
+### Surface d'attaque si Node-RED est compromis
+
+Avec `API_ACTION_TOKEN` + policy-based actions :
+
+| Action | Possible ? |
+|--------|------------|
+| Déclencher la sauvegarde prédéfinie | ✅ Oui |
+| Changer la cible de backup | ❌ Non |
+| Casser un Borg lock | ❌ Non |
+| Changer la passphrase | ❌ Non |
+| Modifier une configuration | ❌ Non |
+| Emergency shutdown | ❌ Non |
+| Envoyer un payload arbitraire | ❌ Non |
+
+---
 
 ## 📦 Installation rapide
 
@@ -26,50 +89,297 @@
 - Clés SSH pour accès dépôt distant (optionnel)
 
 ### 2. Déploiement
+
 ```bash
 # Cloner le repo
 git clone https://github.com/quentinreytinas/borgmatic-api-nextcloud-aio.git
 cd borgmatic-api-nextcloud-aio
-```
 
-### Copier et adapter la config
-```bash
+# Copier et adapter la config
 cp docker-compose.example.yml docker-compose.yml
 ```
 
-### Générer un token fort
+### 3. Générer les tokens
+
 ```bash
+# Legacy mode (un seul token)
 openssl rand -hex 32
+
+# Secure mode (3 tokens)
+openssl rand -hex 32  # API_ADMIN_TOKEN
+openssl rand -hex 32  # API_ACTION_TOKEN
+openssl rand -hex 32  # API_READ_TOKEN
 ```
 
-> ℹ️ **Obligatoire** : `API_TOKEN` doit être défini (valeur non vide). `API_READ_TOKEN` est optionnel et, s'il est absent, l'API utilise `API_TOKEN` comme fallback.
+### 4. Configurer
 
-### Éditer docker-compose.yml et remplacer:
-### - API_TOKEN=CHANGEME_... par votre token
-### - Les chemins volumes à votre configuration
-```bash
-nano docker-compose.yml
-```
+Éditez `docker-compose.yml` et remplacez :
+
+- Les tokens (`API_TOKEN` legacy ou `API_ADMIN_TOKEN` / `API_ACTION_TOKEN` / `API_READ_TOKEN`)
+- Les chemins volumes à votre configuration
+- `ACTIONS_POLICY_PATH` si vous utilisez le mode policy-based
 
 > 🛡️ **Conseil sécurité** : utilisez le service `docker-socket-proxy` fourni dans l'exemple et définissez `DOCKER_HOST=tcp://docker-socket-proxy:2375` plutôt que de monter directement `/var/run/docker.sock`.
 
-### Lancer
+### 5. Lancer
+
 ```bash
 docker compose up -d
 ```
-### Vérifier
+
+### 6. Vérifier
+
 ```bash
 curl -H "Authorization: Bearer VOTRE_TOKEN" \
-     -H "X-From-NodeRed: NodeRED-Internal" \
      http://localhost:5000/health/public
 ```
 
-Exemple : Créer un backup
+---
+
+## ⚡ Policy-Based Actions
+
+Le mode policy-based permet de définir des actions de sauvegarde prédéfinies dans un fichier YAML. Node-RED ne peut alors que déclencher ces actions — il ne peut pas modifier les paramètres.
+
+### Configuration
+
+Créez un fichier `actions-policy.yaml` (voir `actions-policy.example.yaml`) :
+
+```yaml
+allowed_actions:
+  nextcloud-backup-happy:
+    type: nextcloud_aio_backup
+    remote_repo: ssh://sauvegarde_bm@partage.happyfamily.ovh:7832/.../borg
+    restore_after: true
+    daily_backup: true
+    check_backup: false
+    stop_containers: true
+    start_containers: true
+    automatic_updates: false
+    stop_timeout: 60
+    timeout: 21600
+```
+
+Montez le fichier dans le conteneur :
+
+```yaml
+volumes:
+  - ./actions-policy.yaml:/app/actions-policy.yaml:ro
+environment:
+  ACTIONS_POLICY_PATH: /app/actions-policy.yaml
+```
+
+### Utilisation
+
+Node-RED appelle simplement :
+
+```bash
+curl -X POST http://borgmatic-api:5000/actions/nextcloud-backup-happy/run \
+  -H "Authorization: Bearer ${API_ACTION_TOKEN}"
+```
+
+Aucun payload requis. Tous les paramètres (repo, timeout, etc.) sont déterminés côté API à partir de la policy.
+
+### Réponse
+
+```json
+{
+  "ok": true,
+  "job_id": "action:nextcloud-backup-happy:1714425600",
+  "action_name": "nextcloud-backup-happy",
+  "target_display": "ssh://sauvegarde_bm@**redacted**/.../borg",
+  "sse": "http://borgmatic-api:5000/events/stream?job_id=action:nextcloud-backup-happy:1714425600"
+}
+```
+
+Les credentials dans `target_display` sont masqués automatiquement.
+
+### Endpoints actions
+
+| Endpoint | Méthode | Rôle | Description |
+|----------|---------|------|-------------|
+| `/actions` | GET | ACTION+ | Lister les actions (champs sûrs) |
+| `/actions/{name}/run` | POST | ACTION+ | Déclencher une action (async) |
+
+---
+
+## 🔑 Tokens & Authentification
+
+### Mode sécurisé (recommandé pour Node-RED)
+
+```env
+SECURE_MODE=true
+API_ADMIN_TOKEN=<token fort>
+API_ACTION_TOKEN=<token fort>
+API_READ_TOKEN=<token fort>
+```
+
+- **Node-RED** reçoit uniquement `API_ACTION_TOKEN` (+ `API_READ_TOKEN` pour le polling SSE)
+- **Admin** utilise `API_ADMIN_TOKEN` pour les opérations sensibles
+
+### Legacy mode (backward compatible)
+
+```env
+API_TOKEN=<token fort>
+APP_FROM_HEADER=NodeRED-Internal
+```
+
+- `API_TOKEN` : token d'écriture (requis)
+- `API_READ_TOKEN` : token lecture (optionnel, fallback sur `API_TOKEN`)
+- `APP_FROM_HEADER` : valeur attendue dans `X-From-NodeRed`
+
+> ℹ️ L'header `X-From-NodeRed` est ignoré en secure mode.
+
+---
+
+## 📡 API Endpoints
+
+### Health
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/health/public` | GET | Aucune | Healthcheck public |
+| `/health` | GET | Read+ | Healthcheck + version |
+
+### Repositories
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/repositories` | GET | Read+ | Lister les dépôts |
+| `/repositories/{label}/info` | GET | Read+ | Infos dépôt |
+| `/repositories/{label}/check` | POST | Write+ | Vérifier un dépôt |
+| `/repositories/{label}/compact` | POST | Write+ | Compacter un dépôt |
+| `/repositories/{label}/passphrase/change` | POST | Admin+ | Changer passphrase |
+
+### Backups
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/create-backup` | POST | Write+ | Créer un backup |
+| `/list-archives` | GET | Read+ | Lister les archives |
+| `/extract-archive` | POST | Write+ | Extraire une archive |
+| `/mount-archive` | POST | Write+ | Monter une archive |
+
+### Borgmatic Configs
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/configs` | GET | Read+ | Lister les configs |
+| `/configs/{name}` | GET | Read+ | Lire une config |
+| `/configs/{name}` | PUT | Admin+ | Créer/mettre à jour |
+| `/configs/{name}` | DELETE | Admin+ | Supprimer |
+
+### SSH Keys
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/ssh/keys` | GET | Read+ | Lister les clés |
+| `/ssh/keys/generate` | POST | Admin+ | Générer une clé |
+| `/ssh/keys/{name}/test` | POST | Write+ | Tester une connexion |
+
+### Emergency
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/emergency/shutdown` | POST | Admin+ | Arrêt d'urgence |
+| `/borgmatic-locks` | GET | Read+ | Lister les locks |
+| `/borgmatic-locks/break/{label}` | POST | Admin+ | Casser un lock |
+
+### Nextcloud AIO
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/nextcloud/daily-backup/stop` | POST | Write+ | Arrêter le backup officiel |
+| `/nextcloud/daily-backup/run` | POST | Write+ | Lancer le workflow officiel |
+| `/nextcloud/daily-backup/run/async` | POST | Write+ | Workflow officiel (async) |
+| `/nextcloud/daily-backup/run-for-target` | POST | Write+ | Backup avec cible temporaire |
+| `/nextcloud/daily-backup/run-for-target/async` | POST | Write+ | Backup cible temporaire (async) |
+| `/nextcloud/backup-target` | GET | Read+ | Lire la cible actuelle |
+| `/nextcloud/backup-target` | POST | Admin+ | Changer la cible |
+| `/nextcloud/ports/probe` | POST | Write+ | Tester la disponibilité réseau |
+
+### Policy-Based Actions
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/actions` | GET | ACTION+ | Lister les actions |
+| `/actions/{name}/run` | POST | ACTION+ | Déclencher une action |
+
+### Observabilité
+
+| Endpoint | Méthode | Auth | Description |
+|----------|---------|------|-------------|
+| `/metrics` | GET | Read+ | Métriques JSON |
+| `/openapi.yaml` | GET | Aucune | OpenAPI spec |
+| `/events/stream?job_id=` | GET | Read+ | SSE events |
+
+> **Niveaux d'accès** : Read < Write < Admin < ACTION (ACTION ≥ Read pour les actions).
+> Les flags `ENABLE_*` peuvent restreindre certains endpoints même avec un token ADMIN.
+
+---
+
+## 📊 Audit & Observabilité
+
+### Audit logging
+
+En mode policy-based, chaque action génère des entrées JSON structurées :
+
+```json
+{"event":"action_start","timestamp":"2026-04-30T10:00:00Z","action_name":"nextcloud-backup-happy","source_ip":"192.168.1.50","token_role":"action","job_id":"action:nextcloud-backup-happy:1714425600","target_repo":"ssh://..."}
+{"event":"action_complete","job_id":"action:nextcloud-backup-happy:1714425600","exit_code":0,"duration_sec":342.5}
+```
+
+Configuration :
+
+```env
+AUDIT_LOG_PATH=/var/log/borgmatic-api/audit.jsonl  # Fichier (optionnel)
+AUDIT_STDOUT=true                                   # stdout (optionnel)
+```
+
+### Métriques
+
+```bash
+curl -H "Authorization: Bearer ${API_READ_TOKEN}" \
+     http://localhost:5000/metrics
+```
+
+Réponse :
+
+```json
+{
+  "uptime_seconds": 86400,
+  "requests_total": 1523,
+  "responses_ok": 1490,
+  "responses_error_500": 12,
+  "rate_limit_blocked": 21
+}
+```
+
+### Suivi temps réel (SSE)
+
+```javascript
+const evtSource = new EventSource(
+  'http://borgmatic-api:5000/events/stream?job_id=create:1234567890',
+  { headers: { 'Authorization': `Bearer ${API_READ_TOKEN}` } }
+);
+
+evtSource.addEventListener('stdout', (e) => {
+  console.log('Backup progress:', JSON.parse(e.data));
+});
+
+evtSource.addEventListener('stderr', (e) => {
+  console.error('Backup error:', JSON.parse(e.data));
+});
+```
+
+---
+
+## 📝 Exemples d'utilisation
+
+### Créer un backup (legacy)
 
 ```bash
 curl -X POST http://borgmatic-api:5000/create-backup \
   -H "Authorization: Bearer VOTRE_TOKEN" \
-  -H "X-From-NodeRed: NodeRED-Internal" \
   -H "Content-Type: application/json" \
   -d '{
     "repository": "prod",
@@ -80,9 +390,8 @@ curl -X POST http://borgmatic-api:5000/create-backup \
 ```
 
 Réponse :
-json
-```json
 
+```json
 {
   "ok": true,
   "job_id": "create:1234567890",
@@ -96,10 +405,45 @@ json
 }
 ```
 
-> ℹ️ Le champ `official_daily_stop` résume l'exécution de `docker exec nextcloud-aio-mastercontainer /daily-backup.sh stop`. Si
-> l'arrêt est ignoré (valeurs par défaut absentes), l'objet contient `{"skipped": true, ...}`.
+> ℹ️ Le champ `official_daily_stop` résume l'exécution de `docker exec nextcloud-aio-mastercontainer /daily-backup.sh stop`. Si l'arrêt est ignoré (valeurs par défaut absentes), l'objet contient `{"skipped": true, ...}`.
 
-### Orchestration Nextcloud AIO depuis Node-RED
+### Workflow Nextcloud AIO complet
+
+```bash
+curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run \
+  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "with_stop": true,
+    "automatic_updates": true,
+    "daily_backup": true,
+    "check_backup": false,
+    "stop_containers": true,
+    "start_containers": true
+  }'
+```
+
+La réponse contient `result.command`, `result.stdout/stderr`, et l'environnement injecté (`env`) pour audit. Si le script officiel retourne `0` mais que le conteneur `nextcloud-aio-borgbackup` échoue ensuite, l'API répond en erreur avec `error=backup_failed` et inclut la fin des logs Borg.
+
+### Backup avec cible temporaire (legacy)
+
+```bash
+curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run-for-target \
+  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "remote_repo": "ssh://user@host:22/path/to/borg",
+    "restore_after": true,
+    "daily_backup": true,
+    "stop_containers": true,
+    "start_containers": true,
+    "automatic_updates": false
+  }'
+```
+
+> 💡 **En mode policy-based**, utilisez plutôt `POST /actions/{name}/run` pour éviter d'envoyer la cible dans le payload.
+
+### Architecture Node-RED → Borgmatic API
 
 ```mermaid
 flowchart LR
@@ -108,129 +452,9 @@ flowchart LR
     MC -->|Scripts officiels| Stack[Containers Nextcloud AIO]
 ```
 
-> ℹ️ **Socket proxy** : toutes les commandes `docker exec` émises par l'API
-> honorent la variable d'environnement `DOCKER_HOST`. Définissez-la vers le
-> service `docker-socket-proxy` (ex: `tcp://docker-socket-proxy:2375`) pour que
-> chaque arrêt/démarrage passe par la proxy sécurisée.
+> ℹ️ **Socket proxy** : toutes les commandes `docker exec` émises par l'API honorent la variable d'environnement `DOCKER_HOST`. Définissez-la vers le service `docker-socket-proxy` (ex: `tcp://docker-socket-proxy:2375`) pour que chaque arrêt/démarrage passe par la proxy sécurisée.
 
-**1. Forcer l'arrêt du script officiel**
-
-```bash
-curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/stop \
-  -H "Authorization: Bearer VOTRE_TOKEN" \
-  -H "X-From-NodeRed: NodeRED-Internal" \
-  -H "Content-Type: application/json" \
-  -d '{"timeout": 45}'
-```
-
-**2. Rejouer le workflow officiel (stop containers → backup → updates → restart)**
-
-```bash
-curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run \
-  -H "Authorization: Bearer VOTRE_TOKEN" \
-  -H "X-From-NodeRed: NodeRED-Internal" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "with_stop": true,
-        "automatic_updates": true,
-        "daily_backup": true,
-        "check_backup": false,
-        "stop_containers": true,
-        "start_containers": true
-      }'
-```
-
-La réponse contient `result.command`, `result.stdout/stderr`, et l'environnement injecté (`env`) pour audit.
-Si le script officiel retourne `0` mais que le conteneur `nextcloud-aio-borgbackup` échoue
-ensuite, l'API répond désormais en erreur avec `error=backup_failed` et inclut la fin des logs Borg.
-
-**2bis. Changer temporairement la cible puis lancer le backup officiel**
-
-```bash
-curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run-for-target \
-  -H "Authorization: Bearer VOTRE_TOKEN" \
-  -H "X-From-NodeRed: NodeRED-Internal" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg",
-        "restore_after": true,
-        "daily_backup": true,
-        "check_backup": false,
-        "stop_containers": true,
-        "start_containers": true,
-        "automatic_updates": false
-      }'
-```
-
-Pour lire ou modifier la cible sans lancer la sauvegarde:
-- `GET /nextcloud/backup-target`
-- `POST /nextcloud/backup-target`
-
-**3. Vérifier la disponibilité réseau des conteneurs**
-
-```bash
-curl -X POST http://borgmatic-api:5000/nextcloud/ports/probe \
-  -H "Authorization: Bearer VOTRE_TOKEN" \
-  -H "X-From-NodeRed: NodeRED-Internal" \
-  -H "Content-Type: application/json" \
-  -d '{"ports": [80,8443,9000]}'
-```
-
-Les ports indiqués comme `online: true` correspondent aux services accessibles (apache, proxy, collabora, etc.).
-
-### Suivi temps réel (SSE)
-
-```javascript
-// Node-RED ou JavaScript
-const evtSource = new EventSource('http://borgmatic-api:5000/events/stream?job_id=create:1234567890');
-
-evtSource.addEventListener('stdout', (e) => {
-  console.log('Backup progress:', JSON.parse(e.data));
-});
-
-evtSource.addEventListener('stderr', (e) => {
-  console.error('Backup error:', JSON.parse(e.data));
-});
-```
-
-### 📈 Observabilité
-
-- Endpoint JSON `GET /metrics` (auth lecture) exposant :
-  - `uptime_seconds`
-  - `requests_total`
-  - `responses_ok`
-  - Compteurs d'erreurs (`responses_error_<code>`)
-  - `rate_limit_blocked`
-- Logs de validation Docker (`[SECURITY] docker exec validated ...`) toujours envoyés sur stdout pour audit Watchtower/Stackdriver.
-
-### 🔐 Sécurité
-Authentification
-Deux mécanismes obligatoires :
-
-Header custom : X-From-NodeRed: VotreValeur
-Bearer token : Authorization: Bearer VOTRE_TOKEN
-
-### Générer un token fort
-```bash
-openssl rand -hex 32
-```
-
-### Secrets distincts
-L'API refuse si borg_passphrase == ssh_passphrase (sécurité renforcée).
-Rate limiting
-
-
-📝 Licence
-MIT License - voir LICENSE
-🙏 Remerciements
-
-Borgmatic - Outil de backup Borg
-Nextcloud AIO - Nextcloud All-in-One
-Flask - Framework web Python
-
-/create-backup : 5 requêtes / 60s
-/repositories/{label}/check : 10 requêtes / 60s
-/emergency/* : 2 requêtes / 600s
+---
 
 ## 🧪 Développement
 
@@ -245,4 +469,26 @@ ruff check .
 
 # Tests unitaires
 pytest
+
+# Tests avec variables d'environnement
+API_TOKEN=test-write API_READ_TOKEN=test-read APP_FROM_HEADER=NodeRED-Internal pytest -v
 ```
+
+### CI
+
+La CI (GitHub Actions) exécute automatiquement :
+- Lint : `ruff check .`
+- Format : `black --check .`
+- Tests : `pytest -v`
+
+---
+
+## 📝 Licence
+
+MIT License — voir [LICENSE](LICENSE)
+
+## 🙏 Remerciements
+
+- [Borgmatic](https://github.com/borgmatic-collective/borgmatic) — Outil de backup Borg
+- [Nextcloud AIO](https://github.com/nextcloud/all-in-one) — Nextcloud All-in-One
+- [Flask](https://flask.palletsprojects.com/) — Framework web Python
