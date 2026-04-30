@@ -214,6 +214,7 @@ class TestActionPolicy:
 # ---------------------------------------------------------------------------
 class TestAuditLogger:
     def test_audit_logger_writes_to_stdout(self, caplog):
+        caplog.set_level("INFO")
         logger = AuditLogger(stdout=True)
         logger.log_action_start(
             action_name="test",
