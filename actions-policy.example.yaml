@@ -5,6 +5,8 @@
 # POST /actions/<name>/run
 #
 # Chaque action est prédéfinie et ne peut pas être modifiée à l'exécution.
+# Les actions policy pilotent uniquement le workflow officiel Nextcloud AIO:
+# l'API change la cible, lance /daily-backup.sh, puis restaure la cible.
 # Les noms ci-dessous sont des exemples. Remplacez-les par les noms adaptés à
 # votre installation.
 # =============================================================================
@@ -20,16 +22,5 @@ allowed_actions:
     stop_containers: true
     start_containers: true
     automatic_updates: false
-    stop_timeout: 60
-    timeout: 21600
-
-  borgmatic-backup-example:
-    type: borgmatic_backup
-    description: "Sauvegarde borgmatic d'un label prédéfini"
-    # Correspond au fichier /etc/borgmatic.d/<repository>.yaml ou .yml.
-    repository: "example_repository"
-    stats: true
-    progress: true
-    verbosity: 1
     stop_timeout: 60
     timeout: 21600

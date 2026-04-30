@@ -1,14 +1,14 @@
 # Borgmatic API for Nextcloud AIO
 
-🚀 **API REST pour piloter Borgmatic** avec support complet de Nextcloud AIO, mode policy-based sécurisé, et intégration Node-RED.
+🚀 **API REST pour piloter le backup officiel Nextcloud AIO** avec mode policy-based sécurisé et intégration Node-RED.
 
 ---
 
 ## 🎯 Fonctionnalités
 
 - ✅ **API REST complète** : Créer, lister, extraire, monter des archives Borg
-- ✅ **Intégration Nextcloud AIO** : Workflow complet (stop, backup, updates, healthcheck)
-- ✅ **Compatibilité backup officiel** : Arrêt automatique de `daily-backup.sh` avant `borgmatic`
+- ✅ **Intégration Nextcloud AIO** : Workflow officiel complet via `daily-backup.sh`
+- ✅ **Une seule vérité backup** : les actions Node-RED passent par Nextcloud AIO, qui conserve son statut et ses notifications
 - ✅ **SSE (Server-Sent Events)** : Suivi temps réel des backups
 - ✅ **Rate limiting** : Protection contre abus
 - ✅ **Docker-ready** : Mises à jour automatiques via Watchtower
@@ -134,7 +134,9 @@ curl -H "Authorization: Bearer VOTRE_TOKEN" \
 
 ## ⚡ Policy-Based Actions
 
-Le mode policy-based permet de définir des actions de sauvegarde prédéfinies dans un fichier YAML. Node-RED ne peut alors que déclencher ces actions — il ne peut pas modifier les paramètres.
+Le mode policy-based permet de définir des actions de sauvegarde Nextcloud AIO prédéfinies dans un fichier YAML. Node-RED ne peut alors que déclencher ces actions — il ne peut pas modifier les paramètres.
+
+Les actions policy lancent uniquement le workflow officiel Nextcloud AIO : l'API change temporairement la cible, exécute `/daily-backup.sh`, streame les événements, puis restaure la cible précédente. Le statut "Last backup successful/failed" et les notifications restent donc gérés par Nextcloud AIO.
 
 ### Configuration
 
@@ -153,15 +155,6 @@ allowed_actions:
     automatic_updates: false
     stop_timeout: 60
     timeout: 21600
-
-  borgmatic-backup-example:
-    type: borgmatic_backup
-    repository: example_repository
-    stats: true
-    progress: true
-    verbosity: 1
-    stop_timeout: 60
-    timeout: 21600
 ```
 
 Montez le fichier dans le conteneur :
@@ -178,20 +171,20 @@ environment:
 Node-RED appelle simplement :
 
 ```bash
-curl -X POST http://borgmatic-api:5000/actions/borgmatic-backup-example/run \
+curl -X POST http://borgmatic-api:5000/actions/nextcloud-backup-example/run \
   -H "Authorization: Bearer ${API_ACTION_TOKEN}"
 ```
 
-Aucun payload requis. Tous les paramètres (repository, repo distant, timeout, etc.) sont déterminés côté API à partir de la policy. Le code ne contient pas de noms de repositories : les labels borgmatic viennent uniquement de `actions-policy.yaml`.
+Aucun payload requis. Tous les paramètres (cible locale ou dépôt distant, timeout, arrêt/redémarrage des conteneurs, etc.) sont déterminés côté API à partir de la policy. Le code ne contient pas de noms de dépôts réels : les cibles viennent uniquement de `actions-policy.yaml`.
 
 ### Réponse
 
 ```json
 {
   "job_id": "9f9ff4b8-7ed5-4f0a-99dd-2c329fc79f8e",
-  "action": "borgmatic-backup-example",
+  "action": "nextcloud-backup-example",
   "status": "queued",
-  "message": "Action 'borgmatic-backup-example' triggered successfully"
+  "message": "Action 'nextcloud-backup-example' triggered successfully"
 }
 ```
 
@@ -313,7 +306,7 @@ API_READ_TOKEN=<token fort>
 En mode policy-based, chaque action génère des entrées JSON structurées :
 
 ```json
-{"event":"action_start","timestamp":"2026-04-30T10:00:00Z","action_name":"borgmatic-backup-example","source_ip":"192.168.1.50","token_role":"action","job_id":"9f9ff4b8-7ed5-4f0a-99dd-2c329fc79f8e","target_repo":"example_repository"}
+{"event":"action_start","timestamp":"2026-04-30T10:00:00Z","action_name":"nextcloud-backup-example","source_ip":"192.168.1.50","token_role":"action","job_id":"9f9ff4b8-7ed5-4f0a-99dd-2c329fc79f8e","target_repo":"ssh://backup_user@***:22//path/to/nextcloud/borg"}
 {"event":"action_complete","job_id":"9f9ff4b8-7ed5-4f0a-99dd-2c329fc79f8e","exit_code":0,"duration_sec":342.5}
 ```
 
