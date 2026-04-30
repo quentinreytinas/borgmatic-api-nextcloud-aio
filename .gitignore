@@ -20,6 +20,7 @@ configs/
 !openapi.yaml
 !configs/local_backup_example.yaml
 !configs/remote_backup_example.yaml
+!actions-policy.example.yaml
 
 # Backups
 backup/

@@ -1,0 +1,48 @@
+# =============================================================================
+# Actions Policy File - Exemple
+# =============================================================================
+# Ce fichier définit les actions que Node-RED peut déclencher via
+# POST /actions/<name>/run ou POST /actions/<name>/run/async
+#
+# Chaque action est prédéfinie et ne peut pas être modifiée à l'exécution.
+# Node-RED ne peut que déclencher l'action avec ses paramètres figés.
+# =============================================================================
+
+# Sauvegarde Nextcloud vers le dépôt principal
+nextcloud-backup-happy:
+  type: nextcloud_aio_backup
+  remote_repo: "ssh://sauvegarde_bm@partage.happyfamily.ovh:7832//volume1/homes/sauvegarde_bm/borgmatic_bm_nextcloud/borg"
+  daily_backup: true
+  check_backup: false
+  restore_after: true
+  stop_containers: true
+  start_containers: true
+  automatic_updates: false
+  stop_timeout: 60
+  timeout: 21600
+
+# Sauvegarde de vérification (check uniquement)
+nextcloud-check-only:
+  type: nextcloud_aio_backup
+  remote_repo: "ssh://sauvegarde_bm@partage.happyfamily.ovh:7832//volume1/homes/sauvegarde_bm/borgmatic_bm_nextcloud/borg"
+  daily_backup: false
+  check_backup: true
+  restore_after: true
+  stop_containers: false
+  start_containers: false
+  automatic_updates: false
+  stop_timeout: 0
+  timeout: 600
+
+# Sauvegarde vers un dépôt local (test)
+nextcloud-backup-local:
+  type: nextcloud_aio_backup
+  host_location: /backup/nextcloud
+  daily_backup: true
+  check_backup: false
+  restore_after: true
+  stop_containers: true
+  start_containers: true
+  automatic_updates: false
+  stop_timeout: 60
+  timeout: 21600
