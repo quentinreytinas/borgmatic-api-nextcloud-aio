@@ -220,6 +220,15 @@ def _require_auth(read_only=False):
         raise PermissionError(str(exc))
 
 
+def _check_security_flag(flag_name: str) -> None:
+    """Raise PermissionError if the given security flag is disabled."""
+    s = _settings()
+    if not getattr(s, flag_name, True):
+        raise PermissionError(
+            f"This operation is disabled by security policy ({flag_name}=false)"
+        )
+
+
 def _enforce_distinct_pass(borg_pass: Optional[str], ssh_pass: Optional[str]):
     if borg_pass and ssh_pass and borg_pass == ssh_pass:
         raise ValueError(
@@ -1210,6 +1219,8 @@ def aio_backup_target_get():
 def aio_backup_target_set():
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_config_write")
+        _check_security_flag("enable_arbitrary_targets")
         body = request.get_json(force=True, silent=True) or {}
         previous = _set_aio_backup_target(
             host_location=body.get("host_location"),
@@ -1229,6 +1240,7 @@ def aio_backup_target_set():
 def aio_daily_backup_run_for_target():
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_arbitrary_targets")
         body = request.get_json(force=True, silent=True) or {}
         timeout = int(body.get("timeout", 3600))
         restore_after = bool(body.get("restore_after", True))
@@ -1523,6 +1535,7 @@ def _aio_daily_backup_run_for_target_job(job_id: str, body: Dict[str, Any]) -> N
 def aio_daily_backup_run_for_target_async():
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_arbitrary_targets")
         body = request.get_json(force=True, silent=True) or {}
         _validate_aio_backup_target(
             body.get("host_location"),
@@ -1797,6 +1810,7 @@ def config_get(label: str):
 def config_put(label: str):
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_config_write")
         body = request.get_json(force=True, silent=True) or {}
         overwrite = bool(body.get("overwrite", True))
         validate = bool(body.get("validate", True))
@@ -1872,6 +1886,7 @@ def config_put(label: str):
 def config_delete(label: str):
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_config_write")
         try:
             path = _resolve_config(label)
         except FileNotFoundError as e:
@@ -2202,6 +2217,7 @@ def repo_passphrase_change(label: str):
     """borgmatic key change-passphrase"""
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_passphrase_change")
         body = request.get_json(force=True, silent=True) or {}
         borg_passphrase = body.get("borg_passphrase")
         new_borg_passphrase = body.get("new_borg_passphrase")
@@ -2723,6 +2739,7 @@ def locks_active():
 def locks_break(label: str):
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_break_lock")
         try:
             cfg = _resolve_config(label)
         except FileNotFoundError as e:
@@ -2742,6 +2759,7 @@ def locks_break(label: str):
 def locks_emergency_break_all():
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_break_lock")
         out = []
         for pth in Path(BORG_CONFIG_DIR).glob("*.y*ml"):
             args = ["borgmatic", "--config", str(pth), "break-lock"]
@@ -2853,6 +2871,7 @@ def emergency_shutdown():
     """Arrêt d'urgence : umount borg, SIGTERM borgmatic, stop containers AIO, cleanup cache."""
     try:
         _require_auth(read_only=False)
+        _check_security_flag("enable_admin_endpoints")
         results = {}
 
         # 1) umount (fusermount -u sur tous les points 'borg')
