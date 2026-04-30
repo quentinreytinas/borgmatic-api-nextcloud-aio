@@ -19,8 +19,14 @@ umask 077
 : "${BORG_SSH_DIR:=/root/.ssh}"
 
 # Validation des variables critiques
-[ -z "${API_TOKEN:-}" ]       && err "API_TOKEN is required"
-[ -z "${APP_FROM_HEADER:-}" ] && err "APP_FROM_HEADER is required"
+if [ "${SECURE_MODE:-false}" = "true" ]; then
+  [ -z "${API_ADMIN_TOKEN:-}" ]   && err "API_ADMIN_TOKEN is required (SECURE_MODE=true)"
+  [ -z "${API_ACTION_TOKEN:-}" ]  && err "API_ACTION_TOKEN is required (SECURE_MODE=true)"
+  [ -z "${API_READ_TOKEN:-}" ]    && err "API_READ_TOKEN is required (SECURE_MODE=true)"
+else
+  [ -z "${API_TOKEN:-}" ]       && err "API_TOKEN is required"
+  [ -z "${APP_FROM_HEADER:-}" ] && err "APP_FROM_HEADER is required"
+fi
 [ -f /app/borgmatic_api.py ]  || err "/app/borgmatic_api.py not found"
 
 # Vérification des dépendances
