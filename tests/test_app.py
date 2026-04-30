@@ -17,6 +17,12 @@ def app(monkeypatch, tmp_path):
     monkeypatch.setenv("API_READ_TOKEN", "test-read")
     monkeypatch.setenv("APP_FROM_HEADER", "NodeRED-Internal")
     monkeypatch.delenv("APP_READY_WEBHOOK_URL", raising=False)
+    # Redirect audit log to temp dir (avoids /var/log PermissionError in CI)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(log_dir / "audit.log"))
+    # Redirect action policy path to avoid missing file errors
+    monkeypatch.setenv("ACTIONS_POLICY_PATH", str(tmp_path / "actions.yaml"))
     aio_config = tmp_path / "configuration.json"
     aio_config.write_text(
         json.dumps(
@@ -356,11 +362,15 @@ def test_run_for_target_async_returns_job_and_events(monkeypatch, app):
     assert any('"event": "success"' in line for line in status_lines)
 
 
-def test_daily_backup_uses_socket_proxy_when_configured(monkeypatch):
+def test_daily_backup_uses_socket_proxy_when_configured(monkeypatch, tmp_path):
     monkeypatch.setenv("API_TOKEN", "test-write")
     monkeypatch.setenv("API_READ_TOKEN", "test-read")
     monkeypatch.setenv("APP_FROM_HEADER", "NodeRED-Internal")
     monkeypatch.setenv("DOCKER_HOST", "tcp://socket-proxy:2375")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(log_dir / "audit.log"))
+    monkeypatch.setenv("ACTIONS_POLICY_PATH", str(tmp_path / "actions.yaml"))
 
     app = create_app()
     client = app.test_client()
