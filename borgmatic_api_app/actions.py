@@ -65,7 +65,8 @@ class ActionPolicy:
             url = self.remote_repo
             if "@" in url:
                 parts = url.split("@", 1)
-                url = f"{parts[0]}@***:{parts[1].split(':', 1)[1] if ':' in parts[1] else parts[1]}"
+                masked_part = parts[1].split(":", 1)[1] if ":" in parts[1] else parts[1]
+                url = f"{parts[0]}@***:{masked_part}"
             return url
         return self.host_location
 
@@ -174,7 +175,9 @@ class ActionStore:
                 "Action must specify exactly one of remote_repo or host_location, not both"
             )
         elif not remote_repo and not host_location:
-            errors.append("Action must specify exactly one of remote_repo or host_location")
+            errors.append(
+                "Action must specify exactly one of remote_repo or host_location"
+            )
         else:
             if remote_repo and not SSH_URL_PATTERN.match(remote_repo):
                 errors.append(
