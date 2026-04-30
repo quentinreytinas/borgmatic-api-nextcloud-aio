@@ -155,7 +155,7 @@ API_READ_TOKEN=yyy      # Pour poller le statut
 
 ```
 Node-RED
-  -> POST /actions/nextcloud-backup-happy/run/async
+  -> POST /actions/<action-name>/run
      (token: API_ACTION_TOKEN)
   -> Réponse: { job_id, sse_url, poll_url }
   -> GET /events/poll/{job_id}

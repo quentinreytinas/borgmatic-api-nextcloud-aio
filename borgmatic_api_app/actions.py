@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Allowed action types
-ALLOWED_ACTION_TYPES = {"nextcloud_aio_backup"}
+ALLOWED_ACTION_TYPES = {"nextcloud_aio_backup", "borgmatic_backup"}
 
 # Name pattern: simple alphanumeric with hyphens/underscores
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
@@ -40,6 +40,12 @@ class ActionPolicy:
     # Target (exactly one of these)
     remote_repo: str = ""
     host_location: str = ""
+
+    # Borgmatic repository action
+    repository: str = ""
+    stats: bool = True
+    progress: bool = True
+    verbosity: int = 1
 
     # Backup behaviour
     restore_after: bool = False
@@ -65,6 +71,8 @@ class ActionPolicy:
                 parts = url.split("@", 1)
                 url = f"{parts[0]}@***:{parts[1].split(':', 1)[1] if ':' in parts[1] else parts[1]}"
             return url
+        if self.repository:
+            return self.repository
         return self.host_location
 
 
@@ -157,29 +165,59 @@ class ActionStore:
                 f"must be one of {ALLOWED_ACTION_TYPES}"
             )
 
-        # --- target (exactly one of remote_repo or host_location) ---
+        # --- target / repository ---
         remote_repo = str(cfg.get("remote_repo", ""))
         host_location = str(cfg.get("host_location", ""))
+        repository = str(cfg.get("repository", ""))
 
-        if remote_repo and host_location:
-            errors.append(
-                "Action must specify exactly one of remote_repo or host_location, not both"
-            )
-        elif not remote_repo and not host_location:
-            errors.append(
-                "Action must specify exactly one of remote_repo or host_location"
-            )
-        else:
-            if remote_repo and not SSH_URL_PATTERN.match(remote_repo):
+        if action_type == "nextcloud_aio_backup":
+            if repository:
                 errors.append(
-                    f"remote_repo must be an SSH URL (ssh://user@host:port/path), "
-                    f"got: {remote_repo[:50]}..."
+                    "nextcloud_aio_backup must not specify repository; "
+                    "use remote_repo or host_location"
                 )
-            if host_location and not host_location.startswith("/"):
+            if remote_repo and host_location:
                 errors.append(
-                    f"host_location must be an absolute path starting with /, "
-                    f"got: {host_location[:50]}..."
+                    "Action must specify exactly one of remote_repo or host_location, not both"
                 )
+            elif not remote_repo and not host_location:
+                errors.append(
+                    "Action must specify exactly one of remote_repo or host_location"
+                )
+            else:
+                if remote_repo and not SSH_URL_PATTERN.match(remote_repo):
+                    errors.append(
+                        f"remote_repo must be an SSH URL (ssh://user@host:port/path), "
+                        f"got: {remote_repo[:50]}..."
+                    )
+                if host_location and not host_location.startswith("/"):
+                    errors.append(
+                        f"host_location must be an absolute path starting with /, "
+                        f"got: {host_location[:50]}..."
+                    )
+
+        if action_type == "borgmatic_backup":
+            if remote_repo or host_location:
+                errors.append(
+                    "borgmatic_backup must not specify remote_repo or host_location; "
+                    "use repository"
+                )
+            if not repository:
+                errors.append("borgmatic_backup requires repository")
+            elif not NAME_PATTERN.match(repository.replace(".", "_")):
+                errors.append(
+                    "repository is invalid; only alphanumeric, dots, underscores "
+                    "and hyphens are allowed"
+                )
+
+        # --- borgmatic flags ---
+        verbosity = cfg.get("verbosity", 1)
+        try:
+            verbosity = int(verbosity)
+            if not (0 <= verbosity <= 2):
+                errors.append(f"verbosity must be between 0 and 2, got {verbosity}")
+        except (TypeError, ValueError):
+            errors.append(f"verbosity must be an integer, got {verbosity!r}")
 
         # --- timeouts ---
         timeout = cfg.get("timeout", 21600)
@@ -212,6 +250,10 @@ class ActionStore:
             description=str(cfg.get("description", "")),
             remote_repo=remote_repo,
             host_location=host_location,
+            repository=repository,
+            stats=bool(cfg.get("stats", True)),
+            progress=bool(cfg.get("progress", True)),
+            verbosity=verbosity,
             restore_after=bool(cfg.get("restore_after", False)),
             daily_backup=bool(cfg.get("daily_backup", True)),
             check_backup=bool(cfg.get("check_backup", False)),

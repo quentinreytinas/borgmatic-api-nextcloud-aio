@@ -258,7 +258,7 @@ def test_backup_target_routes_round_trip(monkeypatch, app):
     response = client.post(
         "/nextcloud/backup-target",
         json={
-            "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg"
+            "remote_repo": "ssh://backup_user@example.org:22//path/to/nextcloud/borg"
         },
         headers=auth_headers(write=True),
     )
@@ -272,7 +272,7 @@ def test_backup_target_routes_round_trip(monkeypatch, app):
     assert get_response.status_code == 200
     get_payload = get_response.get_json()
     assert get_payload["target"]["remote_repo"].startswith(
-        "ssh://sauvegarde_reytinas@192.168.1.10:22/"
+        "ssh://backup_user@example.org:22/"
     )
 
 
@@ -297,7 +297,7 @@ def test_run_for_target_restores_previous_target(monkeypatch, app):
     response = client.post(
         "/nextcloud/daily-backup/run-for-target",
         json={
-            "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg",
+            "remote_repo": "ssh://backup_user@example.org:22//path/to/nextcloud/borg",
             "restore_after": True,
         },
         headers=auth_headers(write=True),
@@ -331,7 +331,7 @@ def test_run_for_target_async_returns_job_and_events(monkeypatch, app):
     response = client.post(
         "/nextcloud/daily-backup/run-for-target/async",
         json={
-            "remote_repo": "ssh://sauvegarde_reytinas@192.168.1.10:22//volume1/homes/sauvegarde_reytinas/borgmatic_reytinas_nextcloud/borg",
+            "remote_repo": "ssh://backup_user@example.org:22//path/to/nextcloud/borg",
             "restore_after": True,
         },
         headers=auth_headers(write=True),

@@ -7,6 +7,7 @@ actions without exposing sensitive configuration to the caller.
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 import uuid
 from typing import TYPE_CHECKING
@@ -77,14 +78,6 @@ def run_action(name: str):
                 404, "action_not_found", f"Action '{name}' is not defined"
             )
 
-        # Validate action type is supported
-        if policy.type != "nextcloud_aio_backup":
-            return _json_error(
-                501,
-                "action_type_not_supported",
-                f"Action type '{policy.type}' is not yet supported for automated execution",
-            )
-
         # Generate job ID
         job_id = str(uuid.uuid4())
 
@@ -98,14 +91,28 @@ def run_action(name: str):
             target_repo=policy.target_display,
         )
 
-        # Schedule async execution
-        services.executor.submit(
-            _execute_nextcloud_backup,
-            services=services,
-            policy=policy,
-            job_id=job_id,
-            audit_logger=audit,
-        )
+        if policy.type == "nextcloud_aio_backup":
+            # Schedule async execution
+            services.executor.submit(
+                _execute_nextcloud_backup,
+                services=services,
+                policy=policy,
+                job_id=job_id,
+                audit_logger=audit,
+            )
+        elif policy.type == "borgmatic_backup":
+            services.executor.submit(
+                _execute_borgmatic_backup,
+                policy=policy,
+                job_id=job_id,
+                audit_logger=audit,
+            )
+        else:
+            return _json_error(
+                501,
+                "action_type_not_supported",
+                f"Action type '{policy.type}' is not supported for automated execution",
+            )
 
         return _json_ok(
             {
@@ -167,6 +174,113 @@ def _execute_nextcloud_backup(
     except Exception as e:
         duration = time.time() - start_time
         logger.exception("Action execution failed for job %s", job_id)
+        audit_logger.log_action_complete(
+            job_id=job_id,
+            result="fail",
+            exit_code=-1,
+            duration_sec=round(duration, 2),
+            error=str(e),
+        )
+
+
+def _execute_borgmatic_backup(
+    policy: "ActionPolicy",  # noqa: F821
+    job_id: str,
+    audit_logger,
+) -> None:
+    """Execute a borgmatic create action based on the policy."""
+    start_time = time.time()
+    try:
+        from .legacy import (
+            _resolve_config,
+            _run_borgmatic,
+            _stop_official_daily_backup,
+            _push_job_status,
+        )
+
+        _push_job_status(
+            job_id,
+            "start",
+            action=policy.name,
+            repository=policy.repository,
+        )
+
+        cfg_path = _resolve_config(policy.repository)
+        stop_details = _stop_official_daily_backup(timeout=policy.stop_timeout)
+
+        args = [
+            "borgmatic",
+            "--config",
+            str(cfg_path),
+            "create",
+            "--verbosity",
+            str(policy.verbosity),
+        ]
+        if policy.stats:
+            args.append("--stats")
+        if policy.progress:
+            args.append("--progress")
+
+        proc = _run_borgmatic(args, {}, job_id)
+        try:
+            returncode = proc.wait(timeout=policy.timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Timed out waiting for killed borgmatic job %s", job_id)
+            returncode = -1
+            _push_job_status(
+                job_id,
+                "fail",
+                action=policy.name,
+                repository=policy.repository,
+                timeout=True,
+                result={"returncode": returncode},
+                official_daily_stop=stop_details,
+            )
+            audit_logger.log_action_complete(
+                job_id=job_id,
+                result="fail",
+                exit_code=returncode,
+                duration_sec=round(time.time() - start_time, 2),
+                error="borgmatic action timed out",
+            )
+            return
+
+        event = "success" if returncode == 0 else "fail"
+        _push_job_status(
+            job_id,
+            event,
+            action=policy.name,
+            repository=policy.repository,
+            result={"returncode": returncode},
+            official_daily_stop=stop_details,
+        )
+        audit_logger.log_action_complete(
+            job_id=job_id,
+            result=event,
+            exit_code=returncode,
+            duration_sec=round(time.time() - start_time, 2),
+        )
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.exception("Borgmatic action execution failed for job %s", job_id)
+        try:
+            from .legacy import _push_job_status
+
+            _push_job_status(
+                job_id,
+                "fail",
+                action=policy.name,
+                repository=policy.repository,
+                message=str(e),
+                result={"returncode": -1},
+            )
+        except Exception:
+            logger.exception("Failed to push failure status for job %s", job_id)
         audit_logger.log_action_complete(
             job_id=job_id,
             result="fail",

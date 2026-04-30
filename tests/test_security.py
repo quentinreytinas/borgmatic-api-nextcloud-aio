@@ -158,6 +158,60 @@ class TestActionPolicy:
         assert policy.type == "nextcloud_aio_backup"
         assert policy.remote_repo == "ssh://user@host:22/backup"
 
+    def test_valid_borgmatic_policy(self):
+        store = ActionStore()
+        policy = store._validate_and_create(
+            "borgmatic-backup",
+            {
+                "type": "borgmatic_backup",
+                "repository": "example_repository",
+                "stats": True,
+                "progress": False,
+                "verbosity": 1,
+                "stop_timeout": 60,
+                "timeout": 21600,
+            },
+        )
+        assert policy.name == "borgmatic-backup"
+        assert policy.type == "borgmatic_backup"
+        assert policy.repository == "example_repository"
+        assert policy.target_display == "example_repository"
+        assert policy.progress is False
+
+    def test_borgmatic_policy_requires_repository(self):
+        store = ActionStore()
+        with pytest.raises(ActionPolicyError, match="requires repository"):
+            store._validate_and_create(
+                "borgmatic-backup",
+                {
+                    "type": "borgmatic_backup",
+                },
+            )
+
+    def test_borgmatic_policy_rejects_inline_target(self):
+        store = ActionStore()
+        with pytest.raises(ActionPolicyError, match="must not specify remote_repo"):
+            store._validate_and_create(
+                "borgmatic-backup",
+                {
+                    "type": "borgmatic_backup",
+                    "repository": "example_repository",
+                    "remote_repo": "ssh://user@host:22/backup",
+                },
+            )
+
+    def test_nextcloud_policy_rejects_repository(self):
+        store = ActionStore()
+        with pytest.raises(ActionPolicyError, match="must not specify repository"):
+            store._validate_and_create(
+                "nextcloud-backup",
+                {
+                    "type": "nextcloud_aio_backup",
+                    "repository": "example_repository",
+                    "remote_repo": "ssh://user@host:22/backup",
+                },
+            )
+
     def test_invalid_name(self):
         store = ActionStore()
         with pytest.raises(ActionPolicyError, match="invalid"):

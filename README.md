@@ -142,15 +142,24 @@ Créez un fichier `actions-policy.yaml` (voir `actions-policy.example.yaml`) :
 
 ```yaml
 allowed_actions:
-  nextcloud-backup-happy:
+  nextcloud-backup-example:
     type: nextcloud_aio_backup
-    remote_repo: ssh://sauvegarde_bm@partage.happyfamily.ovh:7832/.../borg
+    remote_repo: ssh://backup_user@example.org:22//path/to/nextcloud/borg
     restore_after: true
     daily_backup: true
     check_backup: false
     stop_containers: true
     start_containers: true
     automatic_updates: false
+    stop_timeout: 60
+    timeout: 21600
+
+  borgmatic-backup-example:
+    type: borgmatic_backup
+    repository: example_repository
+    stats: true
+    progress: true
+    verbosity: 1
     stop_timeout: 60
     timeout: 21600
 ```
@@ -169,21 +178,20 @@ environment:
 Node-RED appelle simplement :
 
 ```bash
-curl -X POST http://borgmatic-api:5000/actions/nextcloud-backup-happy/run \
+curl -X POST http://borgmatic-api:5000/actions/borgmatic-backup-example/run \
   -H "Authorization: Bearer ${API_ACTION_TOKEN}"
 ```
 
-Aucun payload requis. Tous les paramètres (repo, timeout, etc.) sont déterminés côté API à partir de la policy.
+Aucun payload requis. Tous les paramètres (repository, repo distant, timeout, etc.) sont déterminés côté API à partir de la policy. Le code ne contient pas de noms de repositories : les labels borgmatic viennent uniquement de `actions-policy.yaml`.
 
 ### Réponse
 
 ```json
 {
-  "ok": true,
-  "job_id": "action:nextcloud-backup-happy:1714425600",
-  "action_name": "nextcloud-backup-happy",
-  "target_display": "ssh://sauvegarde_bm@**redacted**/.../borg",
-  "sse": "http://borgmatic-api:5000/events/stream?job_id=action:nextcloud-backup-happy:1714425600"
+  "job_id": "9f9ff4b8-7ed5-4f0a-99dd-2c329fc79f8e",
+  "action": "borgmatic-backup-example",
+  "status": "queued",
+  "message": "Action 'borgmatic-backup-example' triggered successfully"
 }
 ```
 
@@ -305,8 +313,8 @@ API_READ_TOKEN=<token fort>
 En mode policy-based, chaque action génère des entrées JSON structurées :
 
 ```json
-{"event":"action_start","timestamp":"2026-04-30T10:00:00Z","action_name":"nextcloud-backup-happy","source_ip":"192.168.1.50","token_role":"action","job_id":"action:nextcloud-backup-happy:1714425600","target_repo":"ssh://..."}
-{"event":"action_complete","job_id":"action:nextcloud-backup-happy:1714425600","exit_code":0,"duration_sec":342.5}
+{"event":"action_start","timestamp":"2026-04-30T10:00:00Z","action_name":"borgmatic-backup-example","source_ip":"192.168.1.50","token_role":"action","job_id":"9f9ff4b8-7ed5-4f0a-99dd-2c329fc79f8e","target_repo":"example_repository"}
+{"event":"action_complete","job_id":"9f9ff4b8-7ed5-4f0a-99dd-2c329fc79f8e","exit_code":0,"duration_sec":342.5}
 ```
 
 Configuration :
