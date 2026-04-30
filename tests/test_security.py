@@ -1,4 +1,7 @@
-"""Tests for the security hardening features."""
+"""Tests for the security hardening features.
+
+Updated 2026-04-30: caplog level fix for stdout audit test.
+"""
 
 import os
 from pathlib import Path
