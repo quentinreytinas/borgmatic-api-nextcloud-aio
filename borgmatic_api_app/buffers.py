@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import deque
@@ -47,6 +48,21 @@ class StreamBuffer:
                 }
                 for item in out[:max_items]
             ]
+
+    def get_final_status(self) -> dict:
+        """Extract the final status from the last 'status' buffer item.
+
+        Returns a dict with keys like 'returncode', 'duration', 'exit_message'
+        parsed from the JSON status payload, or an empty dict if not found.
+        """
+        with self.lock:
+            for item in reversed(self.items):
+                if item.kind == "status":
+                    try:
+                        return json.loads(item.line)
+                    except (json.JSONDecodeError, TypeError):
+                        return {}
+        return {}
 
 
 class BufferStore:
