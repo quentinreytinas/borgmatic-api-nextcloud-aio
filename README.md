@@ -27,7 +27,7 @@
 
 ## 🔒 Security Hardening
 
-Par défaut, l'API fonctionne en **legacy mode** (comportement existant). Activez le mode sécurisé pour isoler Node-RED et réduire la surface d'attaque.
+L'API utilise un modèle de sécurité à 3 rôles pour isoler Node-RED et réduire la surface d'attaque.
 
 ### Tokens 3 rôles
 
@@ -37,7 +37,7 @@ Par défaut, l'API fonctionne en **legacy mode** (comportement existant). Active
 | `API_ACTION_TOKEN` | Action | Actions prédéfinies uniquement (pour Node-RED) |
 | `API_READ_TOKEN` | Read | Statut, health, polling jobs, logs |
 
-Activer le mode sécurisé :
+Configuration :
 
 ```env
 SECURE_MODE=true
@@ -46,7 +46,7 @@ API_ACTION_TOKEN=<token action pour Node-RED>
 API_READ_TOKEN=<token lecture>
 ```
 
-En mode sécurisé (`SECURE_MODE=true`), les 3 tokens sont obligatoires. En legacy mode (`SECURE_MODE=false` ou absent), `API_TOKEN` fonctionne comme avant.
+En mode sécurisé (`SECURE_MODE=true`), les 3 tokens sont obligatoires.
 
 ### Flags de sécurité
 
@@ -102,10 +102,6 @@ cp docker-compose.example.yml docker-compose.yml
 ### 3. Générer les tokens
 
 ```bash
-# Legacy mode (un seul token)
-openssl rand -hex 32
-
-# Secure mode (3 tokens)
 openssl rand -hex 32  # API_ADMIN_TOKEN
 openssl rand -hex 32  # API_ACTION_TOKEN
 openssl rand -hex 32  # API_READ_TOKEN
@@ -115,9 +111,9 @@ openssl rand -hex 32  # API_READ_TOKEN
 
 Éditez `docker-compose.yml` et remplacez :
 
-- Les tokens (`API_TOKEN` legacy ou `API_ADMIN_TOKEN` / `API_ACTION_TOKEN` / `API_READ_TOKEN`)
+- Les tokens (`API_ADMIN_TOKEN` / `API_ACTION_TOKEN` / `API_READ_TOKEN`)
 - Les chemins volumes à votre configuration
-- `ACTIONS_POLICY_PATH` si vous utilisez le mode policy-based
+- `ACTIONS_POLICY_PATH` pour les actions prédéfinies
 
 > 🛡️ **Conseil sécurité** : utilisez le service `docker-socket-proxy` fourni dans l'exemple et définissez `DOCKER_HOST=tcp://docker-socket-proxy:2375` plutôt que de monter directement `/var/run/docker.sock`.
 
@@ -204,8 +200,6 @@ Les credentials dans `target_display` sont masqués automatiquement.
 
 ## 🔑 Tokens & Authentification
 
-### Mode sécurisé (recommandé pour Node-RED)
-
 ```env
 SECURE_MODE=true
 API_ADMIN_TOKEN=<token fort>
@@ -215,19 +209,6 @@ API_READ_TOKEN=<token fort>
 
 - **Node-RED** reçoit uniquement `API_ACTION_TOKEN` (+ `API_READ_TOKEN` pour le polling SSE)
 - **Admin** utilise `API_ADMIN_TOKEN` pour les opérations sensibles
-
-### Legacy mode (backward compatible)
-
-```env
-API_TOKEN=<token fort>
-APP_FROM_HEADER=NodeRED-Internal
-```
-
-- `API_TOKEN` : token d'écriture (requis)
-- `API_READ_TOKEN` : token lecture (optionnel, fallback sur `API_TOKEN`)
-- `APP_FROM_HEADER` : valeur attendue dans `X-From-NodeRed`
-
-> ℹ️ L'header `X-From-NodeRed` est ignoré en secure mode.
 
 ---
 
@@ -375,11 +356,11 @@ evtSource.addEventListener('stderr', (e) => {
 
 ## 📝 Exemples d'utilisation
 
-### Créer un backup (legacy)
+### Créer un backup
 
 ```bash
 curl -X POST http://borgmatic-api:5000/create-backup \
-  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "Authorization: Bearer ${API_ADMIN_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "repository": "prod",
@@ -411,7 +392,7 @@ Réponse :
 
 ```bash
 curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run \
-  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "Authorization: Bearer ${API_ADMIN_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "with_stop": true,
@@ -425,11 +406,11 @@ curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run \
 
 La réponse contient `result.command`, `result.stdout/stderr`, et l'environnement injecté (`env`) pour audit. Si le script officiel retourne `0` mais que le conteneur `nextcloud-aio-borgbackup` échoue ensuite, l'API répond en erreur avec `error=backup_failed` et inclut la fin des logs Borg.
 
-### Backup avec cible temporaire (legacy)
+### Backup avec cible temporaire
 
 ```bash
 curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run-for-target \
-  -H "Authorization: Bearer VOTRE_TOKEN" \
+  -H "Authorization: Bearer ${API_ADMIN_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "remote_repo": "ssh://user@host:22/path/to/borg",
@@ -441,7 +422,7 @@ curl -X POST http://borgmatic-api:5000/nextcloud/daily-backup/run-for-target \
   }'
 ```
 
-> 💡 **En mode policy-based**, utilisez plutôt `POST /actions/{name}/run` pour éviter d'envoyer la cible dans le payload.
+> 💡 Pour une meilleure sécurité, utilisez `POST /actions/{name}/run` avec une action prédéfinie afin d'éviter d'envoyer la cible dans le payload.
 
 ### Architecture Node-RED → Borgmatic API
 
@@ -471,7 +452,7 @@ ruff check .
 pytest
 
 # Tests avec variables d'environnement
-API_TOKEN=test-write API_READ_TOKEN=test-read APP_FROM_HEADER=NodeRED-Internal pytest -v
+API_ADMIN_TOKEN=test-admin API_ACTION_TOKEN=test-action API_READ_TOKEN=test-read pytest -v
 ```
 
 ### CI
