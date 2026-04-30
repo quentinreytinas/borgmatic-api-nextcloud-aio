@@ -133,23 +133,28 @@ def _execute_nextcloud_backup(
     """Execute a Nextcloud AIO backup action based on the policy."""
     start_time = time.time()
     try:
-        from ..services import run_nextcloud_daily_backup
+        from .legacy import _aio_daily_backup_run_for_target_job, _buf_get
 
-        # Build the backup kwargs from the policy (all values are pre-validated)
-        result = run_nextcloud_daily_backup(
-            services=services,
-            job_id=job_id,
-            remote_repo=policy.remote_repo or None,
-            host_location=policy.host_location or None,
-            restore_after=policy.restore_after,
-            daily_backup=policy.daily_backup,
-            check_backup=policy.check_backup,
-            stop_containers=policy.stop_containers,
-            start_containers=policy.start_containers,
-            automatic_updates=policy.automatic_updates,
-            stop_timeout=policy.stop_timeout,
-            timeout_sec=policy.timeout,
-        )
+        # Build the body expected by the existing legacy backup runner
+        body = {
+            "restore_after": policy.restore_after,
+            "daily_backup": policy.daily_backup,
+            "check_backup": policy.check_backup,
+            "stop_containers": policy.stop_containers,
+            "start_containers": policy.start_containers,
+            "automatic_updates": policy.automatic_updates,
+            "stop_timeout": policy.stop_timeout,
+            "timeout": policy.timeout,
+        }
+        if policy.remote_repo:
+            body["remote_repo"] = policy.remote_repo
+        if policy.host_location:
+            body["host_location"] = policy.host_location
+
+        _aio_daily_backup_run_for_target_job(job_id, body)
+
+        buf = _buf_get(job_id)
+        result = buf.get_final_status() if buf else {}
 
         duration = time.time() - start_time
         audit_logger.log_action_complete(
