@@ -73,13 +73,16 @@ def run_action(name: str):
         policy = store.get(name)
 
         if policy is None:
-            return _json_error(404, "action_not_found", f"Action '{name}' is not defined")
+            return _json_error(
+                404, "action_not_found", f"Action '{name}' is not defined"
+            )
 
         # Validate action type is supported
         if policy.type != "nextcloud_aio_backup":
             return _json_error(
-                501, "action_type_not_supported",
-                f"Action type '{policy.type}' is not yet supported for automated execution"
+                501,
+                "action_type_not_supported",
+                f"Action type '{policy.type}' is not yet supported for automated execution",
             )
 
         # Generate job ID

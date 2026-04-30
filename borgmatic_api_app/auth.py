@@ -120,7 +120,15 @@ def require_role(*roles: TokenRole) -> Callable:
                 auth: AuthManager = services.auth
                 auth.require(request, list(roles))
             except AuthError:
-                return flask_jsonify({"error": "unauthorized", "message": "Invalid or insufficient token role"}), 401
+                return (
+                    flask_jsonify(
+                        {
+                            "error": "unauthorized",
+                            "message": "Invalid or insufficient token role",
+                        }
+                    ),
+                    401,
+                )
             return func(*args, **kwargs)
 
         return wrapper

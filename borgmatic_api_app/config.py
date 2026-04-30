@@ -50,7 +50,9 @@ class Settings:
     enable_arbitrary_targets: bool = field(default=True)
 
     # --- Actions policy file ---
-    actions_policy_path: Path = field(default=Path("/etc/borgmatic-api/allowed_actions.yaml"))
+    actions_policy_path: Path = field(
+        default=Path("/etc/borgmatic-api/allowed_actions.yaml")
+    )
 
     # --- Audit ---
     audit_log_path: Path = field(default=Path("/var/log/borgmatic-api/audit.log"))
@@ -164,12 +166,22 @@ def load_settings() -> Settings:
         action_token=action_token,
         read_token=read_token,
         legacy_token=legacy_token,
-        secure_mode=os.environ.get("SECURE_MODE", "false").lower() in ("1", "true", "yes"),
-        enable_admin_endpoints=os.environ.get("ENABLE_ADMIN_ENDPOINTS", "true").lower() in ("1", "true", "yes"),
-        enable_config_write=os.environ.get("ENABLE_CONFIG_WRITE", "true").lower() in ("1", "true", "yes"),
-        enable_break_lock=os.environ.get("ENABLE_BREAK_LOCK", "true").lower() in ("1", "true", "yes"),
-        enable_passphrase_change=os.environ.get("ENABLE_PASSPHRASE_CHANGE", "true").lower() in ("1", "true", "yes"),
-        enable_arbitrary_targets=os.environ.get("ENABLE_ARBITRARY_TARGETS", "true").lower() in ("1", "true", "yes"),
+        secure_mode=os.environ.get("SECURE_MODE", "false").lower()
+        in ("1", "true", "yes"),
+        enable_admin_endpoints=os.environ.get("ENABLE_ADMIN_ENDPOINTS", "true").lower()
+        in ("1", "true", "yes"),
+        enable_config_write=os.environ.get("ENABLE_CONFIG_WRITE", "true").lower()
+        in ("1", "true", "yes"),
+        enable_break_lock=os.environ.get("ENABLE_BREAK_LOCK", "true").lower()
+        in ("1", "true", "yes"),
+        enable_passphrase_change=os.environ.get(
+            "ENABLE_PASSPHRASE_CHANGE", "true"
+        ).lower()
+        in ("1", "true", "yes"),
+        enable_arbitrary_targets=os.environ.get(
+            "ENABLE_ARBITRARY_TARGETS", "true"
+        ).lower()
+        in ("1", "true", "yes"),
         actions_policy_path=Path(
             os.environ.get(
                 "ACTIONS_POLICY_PATH",
@@ -182,7 +194,8 @@ def load_settings() -> Settings:
                 "/var/log/borgmatic-api/audit.log",
             )
         ).resolve(),
-        audit_stdout=os.environ.get("AUDIT_STDOUT", "true").lower() in ("1", "true", "yes"),
+        audit_stdout=os.environ.get("AUDIT_STDOUT", "true").lower()
+        in ("1", "true", "yes"),
         from_header=os.environ.get("APP_FROM_HEADER", "BorgmaticAPI"),
         sse_heartbeat=int(os.environ.get("APP_SSE_HEARTBEAT_SEC", "15")),
         sse_base_url=os.environ.get("APP_SSE_BASE_URL", "").rstrip("/"),

@@ -70,8 +70,12 @@ class TestTokenRoleAuth:
         )
         auth = AuthManager(settings)
         from unittest.mock import Mock
+
         req = Mock()
-        req.headers = {"X-From-NodeRed": "BorgmaticAPI", "Authorization": "Bearer admin123"}
+        req.headers = {
+            "X-From-NodeRed": "BorgmaticAPI",
+            "Authorization": "Bearer admin123",
+        }
         role = auth.authenticate(req)
         assert role == TokenRole.ADMIN
 
@@ -94,8 +98,12 @@ class TestTokenRoleAuth:
         )
         auth = AuthManager(settings)
         from unittest.mock import Mock
+
         req = Mock()
-        req.headers = {"X-From-NodeRed": "BorgmaticAPI", "Authorization": "Bearer action123"}
+        req.headers = {
+            "X-From-NodeRed": "BorgmaticAPI",
+            "Authorization": "Bearer action123",
+        }
         role = auth.authenticate(req)
         assert role == TokenRole.ACTION
 
@@ -118,8 +126,12 @@ class TestTokenRoleAuth:
         )
         auth = AuthManager(settings)
         from unittest.mock import Mock
+
         req = Mock()
-        req.headers = {"X-From-NodeRed": "WrongHeader", "Authorization": "Bearer admin123"}
+        req.headers = {
+            "X-From-NodeRed": "WrongHeader",
+            "Authorization": "Bearer admin123",
+        }
         role = auth.authenticate(req)
         assert role is None
 
@@ -130,12 +142,15 @@ class TestTokenRoleAuth:
 class TestActionPolicy:
     def test_valid_ssh_policy(self):
         store = ActionStore()
-        policy = store._validate_and_create("nextcloud-backup", {
-            "type": "nextcloud_aio_backup",
-            "remote_repo": "ssh://user@host:22/backup",
-            "stop_timeout": 60,
-            "timeout": 21600,
-        })
+        policy = store._validate_and_create(
+            "nextcloud-backup",
+            {
+                "type": "nextcloud_aio_backup",
+                "remote_repo": "ssh://user@host:22/backup",
+                "stop_timeout": 60,
+                "timeout": 21600,
+            },
+        )
         assert policy.name == "nextcloud-backup"
         assert policy.type == "nextcloud_aio_backup"
         assert policy.remote_repo == "ssh://user@host:22/backup"
@@ -143,33 +158,45 @@ class TestActionPolicy:
     def test_invalid_name(self):
         store = ActionStore()
         with pytest.raises(ActionPolicyError, match="invalid"):
-            store._validate_and_create("bad name!", {
-                "type": "nextcloud_aio_backup",
-                "remote_repo": "ssh://user@host:22/backup",
-            })
+            store._validate_and_create(
+                "bad name!",
+                {
+                    "type": "nextcloud_aio_backup",
+                    "remote_repo": "ssh://user@host:22/backup",
+                },
+            )
 
     def test_invalid_type(self):
         store = ActionStore()
         with pytest.raises(ActionPolicyError, match="not allowed"):
-            store._validate_and_create("test", {
-                "type": "dangerous_action",
-                "remote_repo": "ssh://user@host:22/backup",
-            })
+            store._validate_and_create(
+                "test",
+                {
+                    "type": "dangerous_action",
+                    "remote_repo": "ssh://user@host:22/backup",
+                },
+            )
 
     def test_missing_target(self):
         store = ActionStore()
         with pytest.raises(ActionPolicyError, match="exactly one"):
-            store._validate_and_create("test", {
-                "type": "nextcloud_aio_backup",
-            })
+            store._validate_and_create(
+                "test",
+                {
+                    "type": "nextcloud_aio_backup",
+                },
+            )
 
     def test_invalid_ssh_url(self):
         store = ActionStore()
         with pytest.raises(ActionPolicyError, match="SSH URL"):
-            store._validate_and_create("test", {
-                "type": "nextcloud_aio_backup",
-                "remote_repo": "ftp://bad-url",
-            })
+            store._validate_and_create(
+                "test",
+                {
+                    "type": "nextcloud_aio_backup",
+                    "remote_repo": "ftp://bad-url",
+                },
+            )
 
     def test_target_display_masks_credentials(self):
         policy = ActionPolicy(
@@ -217,6 +244,7 @@ class TestAuditLogger:
         lines = log_file.read_text().strip().split("\n")
         assert len(lines) == 2
         import json
+
         entry = json.loads(lines[0])
         assert entry["event"] == "action_start"
         assert entry["action_name"] == "test"

@@ -97,7 +97,9 @@ class ActionStore:
         try:
             import yaml
         except ImportError:
-            logger.warning("PyYAML not available; cannot load actions policy from %s", p)
+            logger.warning(
+                "PyYAML not available; cannot load actions policy from %s", p
+            )
             return
 
         try:
@@ -192,13 +194,16 @@ class ActionStore:
         try:
             stop_timeout = int(stop_timeout)
             if not (10 <= stop_timeout <= 300):
-                errors.append(f"stop_timeout must be between 10 and 300, got {stop_timeout}")
+                errors.append(
+                    f"stop_timeout must be between 10 and 300, got {stop_timeout}"
+                )
         except (TypeError, ValueError):
             errors.append(f"stop_timeout must be an integer, got {stop_timeout!r}")
 
         if errors:
             raise ActionPolicyError(
-                f"Invalid action policy '{name}':\n" + "\n".join(f" - {e}" for e in errors)
+                f"Invalid action policy '{name}':\n"
+                + "\n".join(f" - {e}" for e in errors)
             )
 
         return ActionPolicy(

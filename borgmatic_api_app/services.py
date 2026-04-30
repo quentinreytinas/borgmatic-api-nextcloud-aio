@@ -63,7 +63,6 @@ def run_nextcloud_daily_backup(
     from .routes.legacy import (
         _aio_daily_backup_run_for_target_job,
         _buf_get,
-        _push_job_status,
     )
 
     # Build the body that the legacy runner expects
