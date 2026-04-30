@@ -1,13 +1,12 @@
 """Tests for the security hardening features."""
 
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from borgmatic_api_app.config import load_settings, Settings
-from borgmatic_api_app.auth import AuthManager, TokenRole, AuthError
+from borgmatic_api_app.auth import AuthManager, TokenRole
 from borgmatic_api_app.actions import ActionStore, ActionPolicy, ActionPolicyError
 from borgmatic_api_app.audit import AuditLogger
 

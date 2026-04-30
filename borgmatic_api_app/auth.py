@@ -7,7 +7,7 @@ from enum import Enum
 from functools import wraps
 from typing import Callable, List, Optional
 
-from flask import Request, jsonify, request
+from flask import Request, request
 
 from .config import Settings
 
@@ -113,11 +113,14 @@ def require_role(*roles: TokenRole) -> Callable:
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
-            from flask import current_app
+            from flask import current_app, jsonify as flask_jsonify
 
-            services = current_app.config["SERVICES"]
-            auth: AuthManager = services.auth
-            auth.require(request, list(roles))
+            try:
+                services = current_app.config["SERVICES"]
+                auth: AuthManager = services.auth
+                auth.require(request, list(roles))
+            except AuthError:
+                return flask_jsonify({"error": "unauthorized", "message": "Invalid or insufficient token role"}), 401
             return func(*args, **kwargs)
 
         return wrapper

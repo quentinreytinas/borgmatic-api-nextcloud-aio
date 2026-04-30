@@ -30,8 +30,8 @@ def create_app() -> Flask:
 
     # Initialize audit logger
     audit_logger = AuditLogger(
-        log_path=settings.audit_log_path if not settings.audit_stdout else None,
-        stdout=True,
+        log_path=settings.audit_log_path,
+        stdout=settings.audit_stdout,
     )
 
     # Thread pool for async action execution
